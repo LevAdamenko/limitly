@@ -1,0 +1,40 @@
+{
+  "daily": [
+    {
+      "agent": "all",
+      "period": "2026-08-29",
+      "agents": [
+        {
+          "agent": "claude",
+          "inputTokens": 100,
+          "outputTokens": 200,
+          "cacheCreationTokens": 300,
+          "cacheReadTokens": 400,
+          "totalTokens": 1000,
+          "totalCost": 2.50,
+          "modelsUsed": ["claude-test"]
+        },
+        {
+          "agent": "codex",
+          "inputTokens": 1000,
+          "outputTokens": 500,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 500,
+          "totalTokens": 2000,
+          "totalCost": 1.25,
+          "modelsUsed": ["gpt-test"]
+        }
+      ],
+      "totalTokens": 3000,
+      "totalCost": 3.75
+    }
+  ],
+  "totals": {
+    "inputTokens": 1100,
+    "outputTokens": 700,
+    "cacheCreationTokens": 300,
+    "cacheReadTokens": 900,
+    "totalTokens": 3000,
+    "totalCost": 3.75
+  }
+}
