@@ -3,6 +3,11 @@ import LimitlyCore
 
 enum AlertDelivery: String, Codable, CaseIterable { case banner, notification }
 
+enum PercentageDisplayMode: String, Codable, CaseIterable {
+    case used, remaining
+    var displayName: String { self == .used ? "Used" : "Remaining" }
+}
+
 struct AgentSettings: Codable {
     var budgetUnit: BudgetUnit
     var budgetAmount: Double
@@ -37,6 +42,7 @@ final class SettingsStore: ObservableObject {
     @Published var codex = AgentSettings()
     @Published var delivery: AlertDelivery = .banner
     @Published var idleSeconds: Double = 60
+    @Published var percentageDisplay: PercentageDisplayMode = .used
     private let key = "Limitly.Settings.v1"
 
     init() { load() }
@@ -44,22 +50,29 @@ final class SettingsStore: ObservableObject {
     func budget(for agent: AgentID) -> UsageBudget { let c = config(for: agent); return UsageBudget(unit: c.budgetUnit, amount: c.budgetAmount) }
     func weeklyBudget(for agent: AgentID) -> UsageBudget { let c = config(for: agent); return UsageBudget(unit: c.budgetUnit, amount: c.weeklyBudgetAmount) }
     func thresholds(for agent: AgentID) -> [Double] { config(for: agent).thresholds.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) } }
-    func save() { let value = Persisted(claude: claude, codex: codex, delivery: delivery, idleSeconds: idleSeconds); if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) } }
-    private func load() { guard let data = UserDefaults.standard.data(forKey: key), let value = try? JSONDecoder().decode(Persisted.self, from: data) else { return }; claude = value.claude; codex = value.codex; delivery = value.delivery; idleSeconds = value.idleSeconds }
-    private struct Persisted: Codable { var claude: AgentSettings; var codex: AgentSettings; var delivery: AlertDelivery; var idleSeconds: Double }
+    func displayed(_ percentage: Double) -> Double { percentageDisplay == .used ? percentage : max(0, 100 - percentage) }
+    func save() { let value = Persisted(claude: claude, codex: codex, delivery: delivery, idleSeconds: idleSeconds, percentageDisplay: percentageDisplay); if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) } }
+    private func load() { guard let data = UserDefaults.standard.data(forKey: key), let value = try? JSONDecoder().decode(Persisted.self, from: data) else { return }; claude = value.claude; codex = value.codex; delivery = value.delivery; idleSeconds = value.idleSeconds; percentageDisplay = value.percentageDisplay ?? .used }
+    private struct Persisted: Codable { var claude: AgentSettings; var codex: AgentSettings; var delivery: AlertDelivery; var idleSeconds: Double; var percentageDisplay: PercentageDisplayMode? }
 }
 
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
+    let sendTestAlert: () -> Void
     var body: some View {
         Form {
+            Section("Display") {
+                Picker("Show percentage as", selection: $settings.percentageDisplay) { ForEach(PercentageDisplayMode.allCases, id: \.self) { Text($0.displayName).tag($0) } }
+                    .onChange(of: settings.percentageDisplay) { _, _ in settings.save() }
+            }
             Section("Alerts") {
                 Picker("Deliver alerts as", selection: $settings.delivery) { Text("Top banner").tag(AlertDelivery.banner); Text("macOS notification").tag(AlertDelivery.notification) }
                 TextField("Idle after seconds", value: $settings.idleSeconds, format: .number).onChange(of: settings.idleSeconds) { _, _ in settings.save() }
+                Button("Send test alert", action: sendTestAlert)
             }
             agentSection("Claude", binding: $settings.claude)
             agentSection("Codex", binding: $settings.codex)
-            Text("Claude’s percentage is Anthropic’s own real usage figure, read from the Claude desktop app’s local cache — not an estimate. Codex has no such source, so it’s tracked against the budget below instead (dollars by default, since cached tokens can inflate raw token counts unpredictably). Weekly alerts use the trailing seven days.").font(.caption).foregroundStyle(.secondary)
+            Text("Both Claude’s and Codex’s percentages are the providers’ own real usage figures — Claude’s read from the Claude desktop app’s local cache, Codex’s read live from the \u{2018}codex\u{2019} CLI’s account status — not an estimate. The budget fields below are only used as a fallback if that real figure is ever unavailable. Weekly alerts use the trailing seven days; “Remaining” inverts both the current and weekly percentage.").font(.caption).foregroundStyle(.secondary)
         }
         .padding().frame(width: 470).navigationTitle("Limitly Settings")
     }
