@@ -1,39 +1,81 @@
 import AppKit
+import Combine
 import SwiftUI
 import LimitlyCore
 
 @main
 struct LimitlyApp: App {
-    @StateObject private var monitor = UsageMonitor()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        // Two separate MenuBarExtra scenes, not one combined label: a single
-        // compound HStack (icon+text+"·"+icon+text) was silently truncated by
-        // AppKit's status-item sizing to just its first element. Two simple
-        // one-icon-one-text labels are the pattern every other menu-bar app
-        // uses and are what reliably renders in full.
-        MenuBarExtra { MenuContentView(monitor: monitor) } label: {
-            AgentTitle(monitor: monitor, agent: .claude)
-        }
-        .menuBarExtraStyle(.window)
-
-        MenuBarExtra { MenuContentView(monitor: monitor) } label: {
-            AgentTitle(monitor: monitor, agent: .codex)
-        }
-        .menuBarExtraStyle(.window)
-
-        Settings { SettingsView(settings: monitor.settings) }
+        Settings { SettingsView(settings: appDelegate.monitor.settings) }
     }
 }
 
-private struct AgentTitle: View {
-    @ObservedObject var monitor: UsageMonitor
-    let agent: AgentID
+/// Single NSStatusItem with a manually-composed attributed title (icon,
+/// percent, icon, percent) and one NSPopover for the dropdown.
+///
+/// Two prior approaches both broke: one `MenuBarExtra` label containing a
+/// compound HStack (icon+text+"·"+icon+text) got silently truncated to its
+/// first element, and two separate `MenuBarExtra` scenes each opened their
+/// own full-content popover — clicking either could leave two duplicate
+/// dropdowns open at once. A single hand-built NSStatusItem sidesteps both:
+/// AppKit's NSAttributedString/NSTextAttachment title composition is the
+/// same mechanism every other real menu-bar app already uses successfully.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let monitor = UsageMonitor()
+    private var statusItem: NSStatusItem?
+    private var popover: NSPopover?
+    private var cancellable: AnyCancellable?
 
-    var body: some View {
-        HStack(spacing: 4) {
-            AgentGlyph(agent: agent)
-            Text(monitor.percentageText(for: agent)).monospacedDigit()
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.target = self
+        item.button?.action = #selector(togglePopover)
+        statusItem = item
+
+        let pop = NSPopover()
+        pop.behavior = .transient
+        pop.contentViewController = NSHostingController(rootView: MenuContentView(monitor: monitor))
+        popover = pop
+
+        updateTitle()
+        cancellable = monitor.$snapshot
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateTitle() }
+    }
+
+    private func updateTitle() {
+        guard let button = statusItem?.button else { return }
+        let font = NSFont.menuBarFont(ofSize: 0)
+        let iconSize: CGFloat = 14
+        // Vertically centers the icon on the title's text baseline.
+        let baselineOffset = (font.capHeight - iconSize) / 2
+
+        let title = NSMutableAttributedString()
+        for (index, agent) in AgentID.allCases.enumerated() {
+            if index > 0 { title.append(NSAttributedString(string: "  ")) }
+            let attachment = NSTextAttachment()
+            let image = AgentGlyphImages.image(for: agent).copy() as! NSImage
+            image.size = NSSize(width: iconSize, height: iconSize)
+            attachment.image = image
+            attachment.bounds = CGRect(x: 0, y: baselineOffset, width: iconSize, height: iconSize)
+            title.append(NSAttributedString(attachment: attachment))
+            title.append(NSAttributedString(
+                string: " \(monitor.percentageText(for: agent))",
+                attributes: [.font: font]
+            ))
+        }
+        button.attributedTitle = title
+    }
+
+    @objc private func togglePopover() {
+        guard let button = statusItem?.button, let pop = popover else { return }
+        if pop.isShown {
+            pop.performClose(nil)
+        } else {
+            pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }
 }
