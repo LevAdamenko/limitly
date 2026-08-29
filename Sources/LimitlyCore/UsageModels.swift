@@ -33,11 +33,24 @@ public struct UsageSnapshot: Equatable, Sendable {
     public let currentUsage: [AgentID: UsageTotals]
     public let weeklyUsage: [AgentID: UsageTotals]
     public let resetTimes: [AgentID: Date]
+    /// Real, provider-computed percentages (e.g. Anthropic's own "five hour"
+    /// figure from the Claude desktop app's local cache) where available —
+    /// preferred over the budget-derived estimate for agents that have one.
+    public let realCurrentPercentages: [AgentID: Double]
+    public let realWeeklyPercentages: [AgentID: Double]
 
-    public init(currentUsage: [AgentID: UsageTotals], weeklyUsage: [AgentID: UsageTotals], resetTimes: [AgentID: Date] = [:]) {
+    public init(
+        currentUsage: [AgentID: UsageTotals],
+        weeklyUsage: [AgentID: UsageTotals],
+        resetTimes: [AgentID: Date] = [:],
+        realCurrentPercentages: [AgentID: Double] = [:],
+        realWeeklyPercentages: [AgentID: Double] = [:]
+    ) {
         self.currentUsage = currentUsage
         self.weeklyUsage = weeklyUsage
         self.resetTimes = resetTimes
+        self.realCurrentPercentages = realCurrentPercentages
+        self.realWeeklyPercentages = realWeeklyPercentages
     }
 }
 

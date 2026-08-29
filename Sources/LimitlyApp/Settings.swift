@@ -59,7 +59,7 @@ struct SettingsView: View {
             }
             agentSection("Claude", binding: $settings.claude)
             agentSection("Codex", binding: $settings.codex)
-            Text("Claude’s current percentage is its active ~5-hour session block; Codex’s is today because ccusage does not expose Codex session blocks. Dollars are the default because cached tokens can inflate raw token counts unpredictably; weekly alerts use the trailing seven days.").font(.caption).foregroundStyle(.secondary)
+            Text("Claude’s percentage is Anthropic’s own real usage figure, read from the Claude desktop app’s local cache — not an estimate. Codex has no such source, so it’s tracked against the budget below instead (dollars by default, since cached tokens can inflate raw token counts unpredictably). Weekly alerts use the trailing seven days.").font(.caption).foregroundStyle(.secondary)
         }
         .padding().frame(width: 470).navigationTitle("Limitly Settings")
     }

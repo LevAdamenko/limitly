@@ -49,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateTitle() {
         guard let button = statusItem?.button else { return }
         let font = NSFont.menuBarFont(ofSize: 0)
-        let iconSize: CGFloat = 14
+        let iconSize: CGFloat = 17
         // Vertically centers the icon on the title's text baseline.
         let baselineOffset = (font.capHeight - iconSize) / 2
 
@@ -102,7 +102,7 @@ private struct MenuContentView: View {
             Text("Weekly usage").font(.subheadline.weight(.semibold))
             ForEach(AgentID.allCases, id: \.self) { agent in
                 HStack(spacing: 5) {
-                    AgentGlyph(agent: agent, size: 14)
+                    AgentGlyph(agent: agent, size: 17)
                     Text(monitor.weeklyText(for: agent))
                 }
                 .font(.caption)
@@ -122,7 +122,7 @@ private struct MenuContentView: View {
 /// (personal, non-distributed use — not our own artwork).
 private struct AgentGlyph: View {
     let agent: AgentID
-    var size: CGFloat = 15
+    var size: CGFloat = 19
 
     var body: some View {
         Image(nsImage: AgentGlyphImages.image(for: agent))
