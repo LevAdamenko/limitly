@@ -27,7 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let monitor = UsageMonitor()
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
-    private var cancellable: AnyCancellable?
+    private var snapshotCancellable: AnyCancellable?
+    private var iconColorCancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -41,7 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover = pop
 
         updateTitle()
-        cancellable = monitor.$snapshot
+        snapshotCancellable = monitor.$snapshot
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateTitle() }
+        iconColorCancellable = monitor.settings.$iconColor
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateTitle() }
     }
@@ -57,7 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for (index, agent) in AgentID.allCases.enumerated() {
             if index > 0 { title.append(NSAttributedString(string: "  ")) }
             let attachment = NSTextAttachment()
-            let image = AgentGlyphImages.image(for: agent).copy() as! NSImage
+            let image = AgentGlyphImages.image(for: agent, colorMode: monitor.settings.iconColor).copy() as! NSImage
             image.size = NSSize(width: iconSize, height: iconSize)
             attachment.image = image
             attachment.bounds = CGRect(x: 0, y: baselineOffset, width: iconSize, height: iconSize)
@@ -89,7 +93,7 @@ private struct MenuContentView: View {
             ForEach(AgentID.allCases, id: \.self) { agent in
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
-                        AgentGlyph(agent: agent)
+                        AgentGlyph(agent: agent, colorMode: monitor.settings.iconColor)
                         Text(agent.displayName)
                         Spacer()
                         Text(monitor.percentageText(for: agent)).monospacedDigit()
@@ -102,7 +106,7 @@ private struct MenuContentView: View {
             Text("Weekly usage").font(.subheadline.weight(.semibold))
             ForEach(AgentID.allCases, id: \.self) { agent in
                 HStack(spacing: 5) {
-                    AgentGlyph(agent: agent, size: 17)
+                    AgentGlyph(agent: agent, colorMode: monitor.settings.iconColor, size: 17)
                     Text(monitor.weeklyText(for: agent))
                 }
                 .font(.caption)
@@ -123,10 +127,11 @@ private struct MenuContentView: View {
 /// see .gitignore) to use nicer icons on their own machine only.
 private struct AgentGlyph: View {
     let agent: AgentID
+    let colorMode: IconColorMode
     var size: CGFloat = 19
 
     var body: some View {
-        Image(nsImage: AgentGlyphImages.image(for: agent))
+        Image(nsImage: AgentGlyphImages.image(for: agent, colorMode: colorMode))
             .renderingMode(.template)
             .resizable()
             .aspectRatio(contentMode: .fit)
@@ -136,11 +141,31 @@ private struct AgentGlyph: View {
 }
 
 private enum AgentGlyphImages {
-    static let claudeImage = localOverride(named: "ClaudeIcon") ?? symbolImage(named: "sparkle", accessibilityDescription: "Claude")
-    static let codexImage = localOverride(named: "CodexIcon") ?? symbolImage(named: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Codex")
+    static let claudeBase = localOverride(named: "ClaudeIcon") ?? symbolImage(named: "sparkle", accessibilityDescription: "Claude")
+    static let codexBase = localOverride(named: "CodexIcon") ?? symbolImage(named: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Codex")
 
-    static func image(for agent: AgentID) -> NSImage {
-        agent == .claude ? claudeImage : codexImage
+    /// `.automatic` keeps the image a template (macOS adapts it to light/dark
+    /// menu bars); `.black`/`.white` bake in a specific color instead, so it
+    /// stays fixed regardless of menu bar appearance.
+    static func image(for agent: AgentID, colorMode: IconColorMode) -> NSImage {
+        let base = agent == .claude ? claudeBase : codexBase
+        switch colorMode {
+        case .automatic: return base
+        case .black: return tinted(base, color: .black)
+        case .white: return tinted(base, color: .white)
+        }
+    }
+
+    private static func tinted(_ image: NSImage, color: NSColor) -> NSImage {
+        let size = image.size
+        let result = NSImage(size: size)
+        result.lockFocus()
+        color.set()
+        NSRect(origin: .zero, size: size).fill()
+        image.draw(in: NSRect(origin: .zero, size: size), from: .zero, operation: .destinationIn, fraction: 1.0)
+        result.unlockFocus()
+        result.isTemplate = false
+        return result
     }
 
     private static func symbolImage(named name: String, accessibilityDescription: String) -> NSImage {

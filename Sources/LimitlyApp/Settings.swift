@@ -8,6 +8,17 @@ enum PercentageDisplayMode: String, Codable, CaseIterable {
     var displayName: String { self == .used ? "Used" : "Remaining" }
 }
 
+enum IconColorMode: String, Codable, CaseIterable {
+    case automatic, black, white
+    var displayName: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .black: "Black"
+        case .white: "White"
+        }
+    }
+}
+
 struct AgentSettings: Codable {
     var budgetUnit: BudgetUnit
     var budgetAmount: Double
@@ -43,6 +54,7 @@ final class SettingsStore: ObservableObject {
     @Published var delivery: AlertDelivery = .banner
     @Published var idleSeconds: Double = 60
     @Published var percentageDisplay: PercentageDisplayMode = .used
+    @Published var iconColor: IconColorMode = .automatic
     private let key = "Limitly.Settings.v1"
 
     init() { load() }
@@ -51,9 +63,9 @@ final class SettingsStore: ObservableObject {
     func weeklyBudget(for agent: AgentID) -> UsageBudget { let c = config(for: agent); return UsageBudget(unit: c.budgetUnit, amount: c.weeklyBudgetAmount) }
     func thresholds(for agent: AgentID) -> [Double] { config(for: agent).thresholds.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) } }
     func displayed(_ percentage: Double) -> Double { percentageDisplay == .used ? percentage : max(0, 100 - percentage) }
-    func save() { let value = Persisted(claude: claude, codex: codex, delivery: delivery, idleSeconds: idleSeconds, percentageDisplay: percentageDisplay); if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) } }
-    private func load() { guard let data = UserDefaults.standard.data(forKey: key), let value = try? JSONDecoder().decode(Persisted.self, from: data) else { return }; claude = value.claude; codex = value.codex; delivery = value.delivery; idleSeconds = value.idleSeconds; percentageDisplay = value.percentageDisplay ?? .used }
-    private struct Persisted: Codable { var claude: AgentSettings; var codex: AgentSettings; var delivery: AlertDelivery; var idleSeconds: Double; var percentageDisplay: PercentageDisplayMode? }
+    func save() { let value = Persisted(claude: claude, codex: codex, delivery: delivery, idleSeconds: idleSeconds, percentageDisplay: percentageDisplay, iconColor: iconColor); if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) } }
+    private func load() { guard let data = UserDefaults.standard.data(forKey: key), let value = try? JSONDecoder().decode(Persisted.self, from: data) else { return }; claude = value.claude; codex = value.codex; delivery = value.delivery; idleSeconds = value.idleSeconds; percentageDisplay = value.percentageDisplay ?? .used; iconColor = value.iconColor ?? .automatic }
+    private struct Persisted: Codable { var claude: AgentSettings; var codex: AgentSettings; var delivery: AlertDelivery; var idleSeconds: Double; var percentageDisplay: PercentageDisplayMode?; var iconColor: IconColorMode? }
 }
 
 struct SettingsView: View {
@@ -64,6 +76,8 @@ struct SettingsView: View {
             Section("Display") {
                 Picker("Show percentage as", selection: $settings.percentageDisplay) { ForEach(PercentageDisplayMode.allCases, id: \.self) { Text($0.displayName).tag($0) } }
                     .onChange(of: settings.percentageDisplay) { _, _ in settings.save() }
+                Picker("Icon color", selection: $settings.iconColor) { ForEach(IconColorMode.allCases, id: \.self) { Text($0.displayName).tag($0) } }
+                    .onChange(of: settings.iconColor) { _, _ in settings.save() }
             }
             Section("Alerts") {
                 Picker("Deliver alerts as", selection: $settings.delivery) { Text("Top banner").tag(AlertDelivery.banner); Text("macOS notification").tag(AlertDelivery.notification) }
