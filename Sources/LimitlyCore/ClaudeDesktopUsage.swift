@@ -54,9 +54,17 @@ public enum PlanUsageAnalyzer {
     /// session's start is estimated by scanning backward from the latest
     /// sample while `fiveHourPercent` keeps non-decreasing; a drop marks
     /// where the previous 5-hour block ended and the current one began.
+    ///
+    /// The desktop app only samples every ~15 minutes, so `fiveHourPercent`
+    /// can lag the true value by up to that long. `now` linearly
+    /// extrapolates forward from the last two in-block samples' slope,
+    /// bounded to `maxExtrapolation` so a stale/absent app doesn't produce
+    /// an ever-growing guess.
     public static func current(
         from samples: [PlanUsageSample],
-        sessionLength: TimeInterval = 5 * 3600
+        now: Date = Date(),
+        sessionLength: TimeInterval = 5 * 3600,
+        maxExtrapolation: TimeInterval = 20 * 60
     ) -> PlanUsageSnapshot? {
         let sorted = samples.sorted { $0.timestamp < $1.timestamp }
         guard let latest = sorted.last else { return nil }
@@ -66,11 +74,30 @@ public enum PlanUsageAnalyzer {
             index -= 1
         }
         let blockStart = sorted[index].timestamp
+        let blockSamples = Array(sorted[index...])
 
         return PlanUsageSnapshot(
-            fiveHourPercent: latest.fiveHourPercent,
+            fiveHourPercent: extrapolatedFiveHourPercent(blockSamples: blockSamples, now: now, maxExtrapolation: maxExtrapolation),
             sevenDayPercent: latest.sevenDayPercent,
             sessionResetTime: blockStart.addingTimeInterval(sessionLength)
         )
+    }
+
+    private static func extrapolatedFiveHourPercent(
+        blockSamples: [PlanUsageSample], now: Date, maxExtrapolation: TimeInterval
+    ) -> Double {
+        guard let latest = blockSamples.last else { return 0 }
+        let elapsedSinceLatest = now.timeIntervalSince(latest.timestamp)
+        guard elapsedSinceLatest > 0, elapsedSinceLatest <= maxExtrapolation, blockSamples.count >= 2 else {
+            return latest.fiveHourPercent
+        }
+
+        let previous = blockSamples[blockSamples.count - 2]
+        let sampleInterval = latest.timestamp.timeIntervalSince(previous.timestamp)
+        guard sampleInterval > 0 else { return latest.fiveHourPercent }
+
+        let ratePerSecond = (latest.fiveHourPercent - previous.fiveHourPercent) / sampleInterval
+        let projected = latest.fiveHourPercent + ratePerSecond * elapsedSinceLatest
+        return max(latest.fiveHourPercent, min(100, projected))
     }
 }

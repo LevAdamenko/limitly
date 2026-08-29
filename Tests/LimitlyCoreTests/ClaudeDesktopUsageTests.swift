@@ -56,4 +56,43 @@ final class ClaudeDesktopUsageTests: XCTestCase {
         let result = PlanUsageAnalyzer.current(from: [sample])
         XCTAssertEqual(result?.sessionResetTime, sample.timestamp.addingTimeInterval(5 * 3600))
     }
+
+    func testExtrapolatesForwardFromTheLastTwoSamplesSlope() {
+        // Matches the real-world case that surfaced this: 0% -> 9% over 15
+        // minutes, checked again 8 minutes later — should read ~13-14%, not
+        // a stale 9%.
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let samples = [
+            PlanUsageSample(timestamp: base, fiveHourPercent: 0, sevenDayPercent: 45),
+            PlanUsageSample(timestamp: base.addingTimeInterval(900), fiveHourPercent: 9, sevenDayPercent: 46)
+        ]
+
+        let now = base.addingTimeInterval(900 + 480) // 8 minutes after the latest sample
+        let result = PlanUsageAnalyzer.current(from: samples, now: now)
+        XCTAssertEqual(result?.fiveHourPercent ?? 0, 13.8, accuracy: 0.1)
+    }
+
+    func testDoesNotExtrapolateBeyondTheStalenessWindow() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let samples = [
+            PlanUsageSample(timestamp: base, fiveHourPercent: 0, sevenDayPercent: 45),
+            PlanUsageSample(timestamp: base.addingTimeInterval(900), fiveHourPercent: 9, sevenDayPercent: 46)
+        ]
+
+        let now = base.addingTimeInterval(900 + 3600) // an hour later — app likely not running
+        let result = PlanUsageAnalyzer.current(from: samples, now: now)
+        XCTAssertEqual(result?.fiveHourPercent, 9)
+    }
+
+    func testExtrapolationNeverExceedsOneHundredPercent() {
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        let samples = [
+            PlanUsageSample(timestamp: base, fiveHourPercent: 40, sevenDayPercent: 45),
+            PlanUsageSample(timestamp: base.addingTimeInterval(900), fiveHourPercent: 95, sevenDayPercent: 46)
+        ]
+
+        let now = base.addingTimeInterval(900 + 600)
+        let result = PlanUsageAnalyzer.current(from: samples, now: now)
+        XCTAssertEqual(result?.fiveHourPercent, 100)
+    }
 }
