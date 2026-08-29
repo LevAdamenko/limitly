@@ -4,8 +4,8 @@ import LimitlyCore
 enum AlertDelivery: String, Codable, CaseIterable { case banner, notification }
 
 struct AgentSettings: Codable {
-    var budgetUnit: BudgetUnit = .tokens
-    var budgetAmount: Double = 1_000_000
+    var budgetUnit: BudgetUnit = .dollars
+    var budgetAmount: Double = 20
     var thresholds: String = "50, 80, 100"
     var weeklyThreshold: Double = 80
 }
@@ -37,7 +37,7 @@ struct SettingsView: View {
             }
             agentSection("Claude", binding: $settings.claude)
             agentSection("Codex", binding: $settings.codex)
-            Text("Usage percentages are calculated against your own budget, not an API plan limit. Weekly alerts use the trailing seven days. Only Claude has a ccusage session-block reset timer currently.").font(.caption).foregroundStyle(.secondary)
+            Text("Dollars are the default because cached tokens can inflate raw token counts unpredictably; cost is a more stable metric. Usage percentages are calculated against your own budget, not an API plan limit. Weekly alerts use the trailing seven days. Only Claude has a ccusage session-block reset timer currently.").font(.caption).foregroundStyle(.secondary)
         }
         .padding().frame(width: 470).navigationTitle("Limitly Settings")
     }
