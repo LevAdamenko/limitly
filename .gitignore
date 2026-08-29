@@ -5,3 +5,9 @@ DerivedData/
 codex-run.log
 *.xcodeproj/xcuserdata/
 *.xcworkspace/xcuserdata/
+
+# Optional local-only icon override (see AgentGlyphImages in LimitlyApp.swift).
+# Never commit real provider icons here — this repo ships generic SF Symbols
+# by default; this directory exists only so a local checkout can drop in its
+# own PNGs without them ever being tracked.
+/Sources/LimitlyApp/Resources/

@@ -117,9 +117,10 @@ private struct MenuContentView: View {
     }
 }
 
-/// Generic per-agent glyphs built from Apple's own SF Symbols — deliberately
-/// not the providers' logos, to keep this repository free of any
-/// third-party trademarked artwork.
+/// Per-agent glyphs. Ships as generic SF Symbols so the repository stays
+/// free of any third-party trademarked artwork; a developer's own local
+/// checkout can drop PNGs into `Resources/` (gitignored, never published —
+/// see .gitignore) to use nicer icons on their own machine only.
 private struct AgentGlyph: View {
     let agent: AgentID
     var size: CGFloat = 19
@@ -135,8 +136,8 @@ private struct AgentGlyph: View {
 }
 
 private enum AgentGlyphImages {
-    static let claudeImage = symbolImage(named: "sparkle", accessibilityDescription: "Claude")
-    static let codexImage = symbolImage(named: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Codex")
+    static let claudeImage = localOverride(named: "ClaudeIcon") ?? symbolImage(named: "sparkle", accessibilityDescription: "Claude")
+    static let codexImage = localOverride(named: "CodexIcon") ?? symbolImage(named: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Codex")
 
     static func image(for agent: AgentID) -> NSImage {
         agent == .claude ? claudeImage : codexImage
@@ -146,6 +147,18 @@ private enum AgentGlyphImages {
         guard let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription) else {
             return NSImage(size: NSSize(width: 1, height: 1))
         }
+        image.isTemplate = true
+        return image
+    }
+
+    /// `#filePath` resolves to this exact source file's absolute path on the
+    /// machine that compiled it, so this only ever finds anything on a
+    /// from-source local build — never in a build from a fresh clone, and
+    /// never bundled into anything distributed.
+    private static func localOverride(named name: String) -> NSImage? {
+        let sourceDirectory = (#filePath as NSString).deletingLastPathComponent
+        let path = "\(sourceDirectory)/Resources/\(name).png"
+        guard FileManager.default.fileExists(atPath: path), let image = NSImage(contentsOfFile: path) else { return nil }
         image.isTemplate = true
         return image
     }

@@ -16,7 +16,7 @@ let package = Package(
         .executableTarget(
             name: "LimitlyApp",
             dependencies: ["LimitlyCore"],
-            exclude: ["Info.plist"],
+            exclude: ["Info.plist", "Resources"],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
