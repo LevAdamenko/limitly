@@ -8,7 +8,7 @@ struct LimitlyApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        Settings { SettingsView(settings: appDelegate.monitor.settings) }
+        Settings { SettingsView(settings: appDelegate.monitor.settings, sendTestAlert: appDelegate.monitor.sendTestAlert) }
     }
 }
 
@@ -117,9 +117,9 @@ private struct MenuContentView: View {
     }
 }
 
-/// Real per-agent monochrome template icons, taken directly from the
-/// official Claude and ChatGPT desktop apps' own tray-icon assets
-/// (personal, non-distributed use — not our own artwork).
+/// Generic per-agent glyphs built from Apple's own SF Symbols — deliberately
+/// not the providers' logos, to keep this repository free of any
+/// third-party trademarked artwork.
 private struct AgentGlyph: View {
     let agent: AgentID
     var size: CGFloat = 19
@@ -135,16 +135,15 @@ private struct AgentGlyph: View {
 }
 
 private enum AgentGlyphImages {
-    static let claudeImage = loadTemplateImage(named: "ClaudeIcon")
-    static let codexImage = loadTemplateImage(named: "CodexIcon")
+    static let claudeImage = symbolImage(named: "sparkle", accessibilityDescription: "Claude")
+    static let codexImage = symbolImage(named: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Codex")
 
     static func image(for agent: AgentID) -> NSImage {
         agent == .claude ? claudeImage : codexImage
     }
 
-    private static func loadTemplateImage(named name: String) -> NSImage {
-        guard let url = Bundle.module.url(forResource: name, withExtension: "png"),
-              let image = NSImage(contentsOf: url) else {
+    private static func symbolImage(named name: String, accessibilityDescription: String) -> NSImage {
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityDescription) else {
             return NSImage(size: NSSize(width: 1, height: 1))
         }
         image.isTemplate = true
