@@ -71,10 +71,19 @@ public struct CCUsageParser: Sendable {
     /// Claude data, so Codex receives no invented reset time.
     public func parseBlocks(_ data: Data) throws -> [SessionBlock] {
         let report = try JSONDecoder().decode(BlocksReport.self, from: data)
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let formatter = ISO8601DateFormatter()
         return report.blocks.compactMap { row in
-            guard !row.isGap, let start = formatter.date(from: row.startTime), let end = formatter.date(from: row.endTime) else { return nil }
-            return SessionBlock(startTime: start, endTime: end, isActive: row.isActive)
+            guard !row.isGap,
+                  let start = fractionalFormatter.date(from: row.startTime) ?? formatter.date(from: row.startTime),
+                  let end = fractionalFormatter.date(from: row.endTime) ?? formatter.date(from: row.endTime) else { return nil }
+            return SessionBlock(
+                startTime: start,
+                endTime: end,
+                isActive: row.isActive,
+                usage: UsageTotals(totalTokens: row.totalTokens, totalCost: row.costUSD)
+            )
         }
     }
 }
@@ -114,4 +123,23 @@ private struct AgentBreakdown: Decodable {
 private struct Totals: Decodable {}
 
 private struct BlocksReport: Decodable { let blocks: [BlockRow] }
-private struct BlockRow: Decodable { let startTime: String; let endTime: String; let isActive: Bool; let isGap: Bool }
+private struct BlockRow: Decodable {
+    let startTime: String
+    let endTime: String
+    let isActive: Bool
+    let isGap: Bool
+    let totalTokens: UInt64
+    let costUSD: Double
+
+    private enum CodingKeys: String, CodingKey { case startTime, endTime, isActive, isGap, totalTokens, costUSD }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        startTime = try values.decode(String.self, forKey: .startTime)
+        endTime = try values.decode(String.self, forKey: .endTime)
+        isActive = try values.decode(Bool.self, forKey: .isActive)
+        isGap = try values.decode(Bool.self, forKey: .isGap)
+        totalTokens = try values.decodeIfPresent(UInt64.self, forKey: .totalTokens) ?? 0
+        costUSD = try values.decodeIfPresent(Double.self, forKey: .costUSD) ?? 0
+    }
+}

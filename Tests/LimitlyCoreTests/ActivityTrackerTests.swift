@@ -47,6 +47,23 @@ final class ActivityTrackerTests: XCTestCase {
         XCTAssertTrue(tracker.observe(usages: [:], at: start.addingTimeInterval(20), idleInterval: 10).isEmpty)
     }
 
+    func testSessionBlockRolloverResetsActivityWithoutIdleEvent() {
+        var tracker = ActivityTracker()
+        _ = tracker.observe(usages: [.claude: usage(100)], at: start, idleInterval: 10)
+        _ = tracker.observe(usages: [.claude: usage(110)], at: start.addingTimeInterval(1), idleInterval: 10)
+
+        XCTAssertTrue(tracker.observe(
+            usages: [.claude: usage(5)],
+            at: start.addingTimeInterval(20),
+            idleInterval: 10
+        ).isEmpty)
+        XCTAssertTrue(tracker.observe(
+            usages: [.claude: usage(5)],
+            at: start.addingTimeInterval(40),
+            idleInterval: 10
+        ).isEmpty)
+    }
+
     private func usage(_ tokens: UInt64) -> UsageTotals {
         UsageTotals(totalTokens: tokens, totalCost: Double(tokens) / 1_000)
     }

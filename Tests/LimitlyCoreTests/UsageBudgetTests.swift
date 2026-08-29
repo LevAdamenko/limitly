@@ -14,6 +14,15 @@ final class UsageBudgetTests: XCTestCase {
         XCTAssertEqual(budget.percentage(for: usage), 75)
     }
 
+    func testWeeklyBudgetPercentageIsDistinctFromDailyBudgetPercentage() throws {
+        let weeklyUsage = UsageTotals(totalTokens: 40_000, totalCost: 121.69)
+        let dailyBudget = UsageBudget(unit: .dollars, amount: 20)
+        let weeklyBudget = UsageBudget(unit: .dollars, amount: 140)
+
+        XCTAssertEqual(try XCTUnwrap(dailyBudget.percentage(for: weeklyUsage)), 608.45, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(weeklyBudget.percentage(for: weeklyUsage)), 86.9214285714, accuracy: 0.001)
+    }
+
     func testZeroBudgetHasNoPercentage() {
         let usage = UsageTotals(totalTokens: 2_500, totalCost: 7.50)
         XCTAssertNil(UsageBudget(unit: .tokens, amount: 0).percentage(for: usage))

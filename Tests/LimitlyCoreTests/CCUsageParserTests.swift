@@ -28,4 +28,14 @@ final class CCUsageParserTests: XCTestCase {
         XCTAssertEqual(parser.usages(on: day, rows: rows, calendar: calendar)[.claude]?.totalTokens, 50)
         XCTAssertEqual(parser.usages(on: day, rows: rows, calendar: calendar)[.codex]?.totalTokens, 25)
     }
+
+    func testParsesActiveBlockUsageFromCCUsageShape() throws {
+        let json = Data(#"""
+        {"blocks":[{"startTime":"2026-08-29T12:00:00.000Z","endTime":"2026-08-29T17:00:00.000Z","isActive":true,"isGap":false,"costUSD":23.1471805,"tokenCounts":{"inputTokens":754,"outputTokens":286750,"cacheCreationInputTokens":1351010,"cacheReadInputTokens":75346945},"totalTokens":76985459}]}
+        """#.utf8)
+
+        let block = try XCTUnwrap(CCUsageParser().parseBlocks(json).first)
+        XCTAssertTrue(block.isActive)
+        XCTAssertEqual(block.usage, UsageTotals(totalTokens: 76_985_459, totalCost: 23.1471805))
+    }
 }
