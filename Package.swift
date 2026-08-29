@@ -17,6 +17,7 @@ let package = Package(
             name: "LimitlyApp",
             dependencies: ["LimitlyCore"],
             exclude: ["Info.plist"],
+            resources: [.copy("Resources")],
             linkerSettings: [
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
