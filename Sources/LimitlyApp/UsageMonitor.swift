@@ -96,13 +96,36 @@ final class UsageMonitor: ObservableObject {
 }
 
 private enum CCUsageClient {
+    /// Pinned to an exact version rather than `@latest`. `@latest` is a
+    /// dist-tag, which npm/npx refuses to trust from any local cache and
+    /// re-resolves against the registry on *every* invocation — confirmed
+    /// by direct measurement to take 25-30s+ against this app's isolated
+    /// `npm_config_cache` (vs. under a second once pinned to an exact
+    /// version, which npx can resolve entirely from local cache with zero
+    /// network calls). That 25-30s comfortably exceeds `run`'s 20s timeout,
+    /// so `@latest` was making this fail on every single 5-second refresh.
+    private static let ccusagePackage = "ccusage@20.0.20"
+
     static func fetch(now: Date = Date()) throws -> UsageSnapshot {
         let calendar = Calendar.current
         let since = calendar.date(byAdding: .day, value: -6, to: now) ?? now
         let formatter = DateFormatter(); formatter.calendar = calendar; formatter.dateFormat = "yyyy-MM-dd"
-        let dailyData = try run(["--yes", "ccusage@latest", "daily", "--json", "--by-agent", "--since", formatter.string(from: since), "--offline"])
-        let parser = CCUsageParser(); let rows = try parser.parseDailyRows(dailyData)
-        let blocks = (try? run(["--yes", "ccusage@latest", "blocks", "--json", "--active", "--offline"]))
+        let parser = CCUsageParser()
+
+        // ccusage only backs the budget-estimate fallback (see the
+        // Settings footnote) — the "real" percentage clients below are
+        // independent of it. A ccusage failure shouldn't blank out
+        // percentages that already came from those real sources, so it's
+        // captured rather than thrown immediately.
+        var ccusageError: Error?
+        var rows: [AgentID: [DatedUsage]] = [:]
+        do {
+            let dailyData = try run(["--yes", ccusagePackage, "daily", "--json", "--by-agent", "--since", formatter.string(from: since), "--offline"])
+            rows = try parser.parseDailyRows(dailyData)
+        } catch {
+            ccusageError = error
+        }
+        let blocks = (try? run(["--yes", ccusagePackage, "blocks", "--json", "--active", "--offline"]))
             .flatMap { try? parser.parseBlocks($0) } ?? []
         let activeBlock = blocks.first(where: \.isActive)
         var currentUsage = parser.usages(on: now, rows: rows, calendar: calendar)
@@ -121,6 +144,13 @@ private enum CCUsageClient {
             realCurrentPercentages[.codex] = real.fiveHourPercent
             realWeeklyPercentages[.codex] = real.weeklyPercent
             if let reset = real.sessionResetTime { resetTimes[.codex] = reset }
+        }
+
+        // Only surface the ccusage failure if neither agent has a real
+        // percentage to show anyway — otherwise this would still be a
+        // useful, working refresh.
+        if let ccusageError, realCurrentPercentages[.claude] == nil, realCurrentPercentages[.codex] == nil {
+            throw ccusageError
         }
 
         return UsageSnapshot(

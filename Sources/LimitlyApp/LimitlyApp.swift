@@ -59,13 +59,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for (index, agent) in AgentID.allCases.enumerated() {
             if index > 0 { title.append(NSAttributedString(string: "  ")) }
             let attachment = NSTextAttachment()
-            let image = AgentGlyphImages.image(for: agent, colorMode: monitor.settings.iconColor).copy() as! NSImage
-            let renderedSize = iconSize * AgentGlyphImages.sizeMultiplier(for: agent)
-            image.size = NSSize(width: renderedSize, height: renderedSize)
-            attachment.image = image
+            // Fixed `iconSize` box for every agent — same reasoning as
+            // `AgentGlyph`'s outer frame: an `NSTextAttachment` is laid out
+            // by its `bounds` size, so a per-agent-scaled bounds (the
+            // previous code) shifted everything after it in the title.
+            attachment.image = AgentGlyphImages.centeredIcon(for: agent, colorMode: monitor.settings.iconColor, boxSize: iconSize)
             // Vertically centers the icon on the title's text baseline.
-            let baselineOffset = (font.capHeight - renderedSize) / 2
-            attachment.bounds = CGRect(x: 0, y: baselineOffset, width: renderedSize, height: renderedSize)
+            let baselineOffset = (font.capHeight - iconSize) / 2
+            attachment.bounds = CGRect(x: 0, y: baselineOffset, width: iconSize, height: iconSize)
             title.append(NSAttributedString(attachment: attachment))
             title.append(NSAttributedString(
                 string: " \(monitor.percentageText(for: agent))",
@@ -87,6 +88,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 private struct MenuContentView: View {
     @ObservedObject var monitor: UsageMonitor
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -183,7 +185,15 @@ private struct MenuContentView: View {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
 
-                SettingsLink {
+                Button {
+                    // This is an LSUIElement (accessory) app — it has no Dock
+                    // icon and never gets automatically activated, so the
+                    // Settings scene opens *behind* whatever app is currently
+                    // frontmost instead of on top. Activating first is what
+                    // actually brings it forward.
+                    NSApp.activate(ignoringOtherApps: true)
+                    openSettings()
+                } label: {
                     Label("Settings…", systemImage: "gearshape")
                 }
 
@@ -234,6 +244,14 @@ private struct AgentGlyph: View {
             .resizable()
             .aspectRatio(contentMode: .fit)
             .frame(width: renderedSize, height: renderedSize)
+            // Fixed outer slot, same width for every agent regardless of
+            // `renderedSize` — this frame just centers the (possibly
+            // bigger/smaller) glyph inside it. Sizing the *outer* frame by
+            // renderedSize instead (the previous code) fed a different
+            // width into the enclosing HStack per agent, which shifted
+            // every element after it — Claude's icon+text visibly sat
+            // further right than Codex's in the same card layout.
+            .frame(width: size, height: size)
             .accessibilityLabel(agent.displayName)
     }
 }
@@ -268,6 +286,23 @@ private enum AgentGlyphImages {
     /// Claude visibly renders smaller. Scaling its frame up compensates —
     /// the extra padding scales with it, but so does the visible glyph.
     static func sizeMultiplier(for agent: AgentID) -> CGFloat { agent == .claude ? 1.4 : 0.9 }
+
+    /// Composites the glyph, scaled by `sizeMultiplier`, centered onto a
+    /// fixed `boxSize` × `boxSize` canvas — used for `NSTextAttachment`
+    /// (menu bar title), where the drawn image and the attachment's layout
+    /// footprint are the same size, unlike SwiftUI's `AgentGlyph`, which can
+    /// nest two independently-sized frames instead.
+    static func centeredIcon(for agent: AgentID, colorMode: IconColorMode, boxSize: CGFloat) -> NSImage {
+        let source = image(for: agent, colorMode: colorMode)
+        let renderedSize = boxSize * sizeMultiplier(for: agent)
+        let inset = (boxSize - renderedSize) / 2
+        let result = NSImage(size: NSSize(width: boxSize, height: boxSize))
+        result.lockFocus()
+        source.draw(in: NSRect(x: inset, y: inset, width: renderedSize, height: renderedSize), from: .zero, operation: .sourceOver, fraction: 1.0)
+        result.unlockFocus()
+        result.isTemplate = source.isTemplate
+        return result
+    }
 
     /// `destinationIn` masks the tint color by `image`'s own alpha channel.
     private static func tinted(_ image: NSImage, color: NSColor) -> NSImage {
