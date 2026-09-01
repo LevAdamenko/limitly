@@ -30,7 +30,18 @@ final class BannerController {
         let size = host.fittingSize
         let width = size.width; let height = size.height
         let panel = self.panel ?? NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.level = .statusBar; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true; panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]; panel.contentView = host
+        panel.level = .statusBar; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
+        // `.canJoinAllSpaces` only extends to ordinary Spaces — a Space
+        // occupied by *another app's* fullscreen window is isolated and
+        // doesn't honor it, so the banner silently never appeared there.
+        // `.moveToActiveSpace` is the flag for exactly this: relocate the
+        // window to whichever Space the user is currently on (fullscreen
+        // or not) each time this app is activated, instead of asking that
+        // Space to display a window that already lives elsewhere. Apple's
+        // docs call `.canJoinAllSpaces`/`.moveToActiveSpace` mutually
+        // exclusive, so this replaces rather than adds to it.
+        panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        panel.contentView = host
         // The panel is reused across calls, so its size must be reset here
         // too, not just its position — otherwise a later banner with longer
         // text keeps an earlier, differently-sized banner's window bounds
@@ -48,7 +59,13 @@ final class BannerController {
             let origin = NSPoint(x: visible.midX - width / 2, y: visible.maxY - height - 8)
             panel.setFrame(NSRect(origin: origin, size: NSSize(width: width, height: height)), display: true)
         }
+        panel.alphaValue = 0
         panel.orderFrontRegardless(); self.panel = panel
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+        }
         // `NSSound.beep()` is a system alert call routed through NSApp — on
         // some setups that can trigger the "flash screen instead of sound"
         // accessibility behavior or otherwise touch window/focus state,
@@ -57,8 +74,20 @@ final class BannerController {
         // audio call with no such side effects.
         NSSound(named: "Glass")?.play()
         let item = DispatchWorkItem { [weak self, weak panel] in
-            panel?.orderOut(nil)
-            self?.advanceQueue()
+            guard let panel else { self?.advanceQueue(); return }
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.18
+                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                // `NSAnimationContext`'s completion handler runs on the
+                // main thread in practice but isn't statically known to
+                // the compiler as `@MainActor`, hence the explicit hop.
+                Task { @MainActor in
+                    panel.orderOut(nil)
+                    self?.advanceQueue()
+                }
+            })
         }
         dismissWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: item)

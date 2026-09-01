@@ -217,12 +217,14 @@ private struct MenuContentView: View {
                     // `.titled` style mask, which uniquely picks out the
                     // Settings window since every other window this app
                     // creates (the popover, the borderless alert banner) is
-                    // deliberately not titled — closes that gap.
+                    // deliberately not titled — closes that gap. See
+                    // `bringSettingsWindowToFront()` for the fullscreen case.
                     NSApp.activate(ignoringOtherApps: true)
                     openSettings()
+                    bringSettingsWindowToFront()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                         NSApp.activate(ignoringOtherApps: true)
-                        NSApp.windows.first(where: { $0.styleMask.contains(.titled) })?.makeKeyAndOrderFront(nil)
+                        bringSettingsWindowToFront()
                     }
                 } label: {
                     Label("Settings…", systemImage: "gearshape")
@@ -256,6 +258,35 @@ private struct MenuContentView: View {
         if percentage >= 90 { return .red }
         if percentage >= 70 { return .orange }
         return .green
+    }
+
+    private func bringSettingsWindowToFront() {
+        guard let window = NSApp.windows.first(where: { $0.styleMask.contains(.titled) }) else { return }
+        // `.canJoinAllSpaces` only extends to ordinary Spaces — a Space
+        // occupied by *another app's* fullscreen window is isolated and
+        // doesn't honor it, so the window never actually appeared there.
+        // `.moveToActiveSpace` is the flag for exactly this: relocate the
+        // window to whichever Space the user is currently on (fullscreen
+        // or not) each time this app is activated, instead of asking that
+        // Space to display a window that already lives elsewhere. Apple's
+        // docs call `.canJoinAllSpaces`/`.moveToActiveSpace` mutually
+        // exclusive, so this replaces rather than merges into whatever was
+        // set before.
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        // This runs twice (an immediate attempt, then a 0.15s follow-up in
+        // case the first lost the race with window construction) — only
+        // fade in on whichever call actually finds it not yet visible, so
+        // a successful first attempt doesn't get a pointless second
+        // fade-from-0 flicker from the follow-up.
+        let wasVisible = window.isVisible
+        if !wasVisible { window.alphaValue = 0 }
+        window.makeKeyAndOrderFront(nil)
+        guard !wasVisible else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = 1
+        }
     }
 }
 

@@ -81,7 +81,12 @@ enum GhosttyController {
 
     /// `osascript` is bounded because this is sampled frequently and an
     /// automation-permission prompt or wedged Ghostty must not stall usage
-    /// refreshes indefinitely.
+    /// refreshes indefinitely. Waits on `terminationHandler` firing rather
+    /// than polling `process.isRunning` in a sleep loop — this call runs on
+    /// every refresh (every 5s whenever idle notifications are on), so a
+    /// 20ms busy-poll was waking the thread up to ~75 times per call for no
+    /// reason; a semaphore blocks properly and reacts the instant the
+    /// process actually exits instead.
     private static func runAppleScript(
         _ script: String,
         arguments: [String] = [],
@@ -93,14 +98,13 @@ enum GhosttyController {
         let output = Pipe()
         process.standardOutput = output
         process.standardError = Pipe()
+
+        let semaphore = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in semaphore.signal() }
         guard (try? process.run()) != nil else { return nil }
 
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning, Date() < deadline {
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-        guard !process.isRunning else {
-            process.terminate()
+        guard semaphore.wait(timeout: .now() + timeout) == .success else {
+            if process.isRunning { process.terminate() }
             return nil
         }
         guard process.terminationStatus == 0 else { return nil }
