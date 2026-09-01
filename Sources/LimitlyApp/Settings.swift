@@ -25,16 +25,18 @@ struct AgentSettings: Codable {
     var weeklyBudgetAmount: Double
     var thresholds: String
     var weeklyThreshold: Double
+    var thresholdNotificationsEnabled: Bool
 
-    init(budgetUnit: BudgetUnit = .dollars, budgetAmount: Double = 20, weeklyBudgetAmount: Double = 140, thresholds: String = "50, 80, 100", weeklyThreshold: Double = 80) {
+    init(budgetUnit: BudgetUnit = .dollars, budgetAmount: Double = 20, weeklyBudgetAmount: Double = 140, thresholds: String = "50, 80, 100", weeklyThreshold: Double = 80, thresholdNotificationsEnabled: Bool = true) {
         self.budgetUnit = budgetUnit
         self.budgetAmount = budgetAmount
         self.weeklyBudgetAmount = weeklyBudgetAmount
         self.thresholds = thresholds
         self.weeklyThreshold = weeklyThreshold
+        self.thresholdNotificationsEnabled = thresholdNotificationsEnabled
     }
 
-    private enum CodingKeys: String, CodingKey { case budgetUnit, budgetAmount, weeklyBudgetAmount, thresholds, weeklyThreshold }
+    private enum CodingKeys: String, CodingKey { case budgetUnit, budgetAmount, weeklyBudgetAmount, thresholds, weeklyThreshold, thresholdNotificationsEnabled }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -44,6 +46,7 @@ struct AgentSettings: Codable {
         weeklyBudgetAmount = try values.decodeIfPresent(Double.self, forKey: .weeklyBudgetAmount) ?? 140
         thresholds = try values.decodeIfPresent(String.self, forKey: .thresholds) ?? "50, 80, 100"
         weeklyThreshold = try values.decodeIfPresent(Double.self, forKey: .weeklyThreshold) ?? 80
+        thresholdNotificationsEnabled = try values.decodeIfPresent(Bool.self, forKey: .thresholdNotificationsEnabled) ?? true
     }
 }
 
@@ -187,9 +190,19 @@ struct SettingsView: View {
 
             rowDivider
 
+            settingRow("Notify at thresholds") {
+                Toggle("Notify at thresholds", isOn: binding.thresholdNotificationsEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .onChange(of: binding.thresholdNotificationsEnabled.wrappedValue) { _, _ in settings.save() }
+            }
+
+            rowDivider
+
             settingRow("Usage thresholds (%)") {
                 TextField("Usage thresholds (%)", text: binding.thresholds)
                     .textFieldStyle(.roundedBorder)
+                    .disabled(!binding.thresholdNotificationsEnabled.wrappedValue)
                     .onChange(of: binding.thresholds.wrappedValue) { _, _ in settings.save() }
             }
 
@@ -206,6 +219,7 @@ struct SettingsView: View {
             settingRow("Weekly threshold (%)") {
                 TextField("Weekly threshold (%)", value: binding.weeklyThreshold, format: .number)
                     .textFieldStyle(.roundedBorder)
+                    .disabled(!binding.thresholdNotificationsEnabled.wrappedValue)
                     .onChange(of: binding.weeklyThreshold.wrappedValue) { _, _ in settings.save() }
             }
         }

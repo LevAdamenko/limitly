@@ -207,10 +207,23 @@ private struct MenuContentView: View {
                     // This is an LSUIElement (accessory) app — it has no Dock
                     // icon and never gets automatically activated, so the
                     // Settings scene opens *behind* whatever app is currently
-                    // frontmost instead of on top. Activating first is what
-                    // actually brings it forward.
+                    // frontmost instead of on top. Activating first helps,
+                    // but `openSettings()` constructs the window
+                    // asynchronously (especially the very first call in a
+                    // session), so the synchronous `activate()` here can
+                    // still lose that race and leave the window created but
+                    // buried. A short follow-up that re-activates and
+                    // explicitly orders the window front — matched by
+                    // `.titled` style mask, which uniquely picks out the
+                    // Settings window since every other window this app
+                    // creates (the popover, the borderless alert banner) is
+                    // deliberately not titled — closes that gap.
                     NSApp.activate(ignoringOtherApps: true)
                     openSettings()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        NSApp.activate(ignoringOtherApps: true)
+                        NSApp.windows.first(where: { $0.styleMask.contains(.titled) })?.makeKeyAndOrderFront(nil)
+                    }
                 } label: {
                     Label("Settings…", systemImage: "gearshape")
                 }

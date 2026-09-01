@@ -78,8 +78,15 @@ final class UsageMonitor: ObservableObject {
         let weeklyPercentages = weeklyPercentages(result)
         let thresholdEvents = thresholdDetector.observe(percentages: dailyPercentages, thresholds: Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, settings.thresholds(for: $0)) }))
         let weeklyEvents = weeklyDetector.observe(percentages: weeklyPercentages, thresholds: Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, settings.config(for: $0).weeklyThreshold) }))
-        for event in thresholdEvents { deliver(title: "\(event.agent.displayName) usage alert", body: "Current usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).") }
-        for event in weeklyEvents { deliver(title: "\(event.agent.displayName) weekly usage alert", body: "Trailing 7-day usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).") }
+        // The detectors still observe every tick regardless of this toggle
+        // (cheap, and keeps their crossing state correct for whenever it's
+        // turned back on) — only delivery is gated per agent.
+        for event in thresholdEvents where settings.config(for: event.agent).thresholdNotificationsEnabled {
+            deliver(title: "\(event.agent.displayName) usage alert", body: "Current usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).")
+        }
+        for event in weeklyEvents where settings.config(for: event.agent).thresholdNotificationsEnabled {
+            deliver(title: "\(event.agent.displayName) weekly usage alert", body: "Trailing 7-day usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).")
+        }
         if settings.idleNotificationsEnabled {
             let candidates = terminals.flatMap { terminal in
                 AgentID.allCases.map {
