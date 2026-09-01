@@ -4,6 +4,26 @@ Native macOS menu-bar app that shows live Claude Code and Codex CLI usage,
 with alerts on current-session thresholds, weekly thresholds, and idle
 periods.
 
+## Download
+
+Grab the latest build from [Releases](https://github.com/LevAdamenko/limitly/releases/latest),
+unzip it, and drag `LimitlyApp.app` to `/Applications`.
+
+This build isn't notarized by Apple (that requires a paid Apple Developer
+account), so the first launch needs one manual step — macOS will otherwise
+refuse to open it with "Apple could not verify... is free of malware":
+
+1. Double-click `LimitlyApp.app`. You'll see a warning dialog — click **Done**
+   (not "Move to Trash").
+2. Open **System Settings → Privacy & Security**, scroll down, and click
+   **Open Anyway** next to the mention of LimitlyApp.
+3. Confirm **Open** in the dialog that follows. It launches normally every
+   time after this — this is only needed once.
+
+(Alternatively, if you're comfortable with the terminal: `xattr -d
+com.apple.quarantine /Applications/LimitlyApp.app` before the first launch
+skips the dialogs entirely.)
+
 ## Where the numbers come from
 
 - **Claude** — Anthropic's own real "five hour" and "seven day" usage
@@ -41,7 +61,7 @@ against a user-configured budget instead of failing outright.
 - A "Send test alert" button in Settings to preview banner placement and
   sound without waiting for a real threshold
 
-## Running
+## Running from source
 
 ```
 swift run LimitlyApp
