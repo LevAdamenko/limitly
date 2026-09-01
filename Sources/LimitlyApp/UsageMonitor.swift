@@ -32,6 +32,11 @@ final class UsageMonitor: ObservableObject {
     /// app's local cache) over the budget-derived estimate when available —
     /// see `realPercentage(for:)`.
     func percentageText(for agent: AgentID) -> String { guard let value = realPercentage(for: agent) else { return "—" }; return "\(Int(settings.displayed(value).rounded()))%" }
+    /// The actual fraction of budget used, ignoring the "Show percentage
+    /// as" display toggle — for UI that visualizes severity (progress bars,
+    /// color coding), which must reflect real usage even when the user has
+    /// chosen to display the inverted "Remaining" number as text.
+    func usedFraction(for agent: AgentID) -> Double? { realPercentage(for: agent) }
     func weeklyText(for agent: AgentID) -> String { guard let usage = snapshot.weeklyUsage[agent] else { return "No data" }; let real = snapshot.realWeeklyPercentages[agent]; let pct = (real ?? settings.weeklyBudget(for: agent).percentage(for: usage)).map { " (\(Int(settings.displayed($0).rounded()))%)" } ?? ""; return format(usage, unit: settings.budget(for: agent).unit) + pct }
     private func realPercentage(for agent: AgentID) -> Double? {
         if let real = snapshot.realCurrentPercentages[agent] { return real }
