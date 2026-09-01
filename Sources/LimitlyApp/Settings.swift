@@ -71,32 +71,192 @@ final class SettingsStore: ObservableObject {
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     let sendTestAlert: () -> Void
+
     var body: some View {
-        Form {
-            Section("Display") {
-                Picker("Show percentage as", selection: $settings.percentageDisplay) { ForEach(PercentageDisplayMode.allCases, id: \.self) { Text($0.displayName).tag($0) } }
-                    .onChange(of: settings.percentageDisplay) { _, _ in settings.save() }
-                Picker("Icon color", selection: $settings.iconColor) { ForEach(IconColorMode.allCases, id: \.self) { Text($0.displayName).tag($0) } }
-                    .onChange(of: settings.iconColor) { _, _ in settings.save() }
+        ScrollView {
+            VStack(spacing: 16) {
+                settingsCard(title: "Display", symbol: "slider.horizontal.3") {
+                    settingRow("Show percentage as") {
+                        Picker("Show percentage as", selection: $settings.percentageDisplay) {
+                            ForEach(PercentageDisplayMode.allCases, id: \.self) {
+                                Text($0.displayName).tag($0)
+                            }
+                        }
+                        .labelsHidden()
+                        .onChange(of: settings.percentageDisplay) { _, _ in settings.save() }
+                    }
+
+                    rowDivider
+
+                    settingRow("Icon color") {
+                        Picker("Icon color", selection: $settings.iconColor) {
+                            ForEach(IconColorMode.allCases, id: \.self) {
+                                Text($0.displayName).tag($0)
+                            }
+                        }
+                        .labelsHidden()
+                        .onChange(of: settings.iconColor) { _, _ in settings.save() }
+                    }
+                }
+
+                settingsCard(title: "Alerts", symbol: "bell.badge") {
+                    settingRow("Deliver alerts as") {
+                        Picker("Deliver alerts as", selection: $settings.delivery) {
+                            Text("Top banner").tag(AlertDelivery.banner)
+                            Text("macOS notification").tag(AlertDelivery.notification)
+                        }
+                        .labelsHidden()
+                    }
+
+                    rowDivider
+
+                    settingRow("Idle after seconds") {
+                        TextField("Idle after seconds", value: $settings.idleSeconds, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: settings.idleSeconds) { _, _ in settings.save() }
+                    }
+
+                    rowDivider
+
+                    settingRow("") {
+                        Button("Send test alert", action: sendTestAlert)
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+
+                agentSection("Claude", symbol: "sparkles", binding: $settings.claude)
+                agentSection("Codex", symbol: "terminal", binding: $settings.codex)
+
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.secondary)
+                    Text("Both Claude’s and Codex’s percentages are the providers’ own real usage figures — Claude’s read from the Claude desktop app’s local cache, Codex’s read live from the \u{2018}codex\u{2019} CLI’s account status — not an estimate. The budget fields below are only used as a fallback if that real figure is ever unavailable. Weekly alerts use the trailing seven days; “Remaining” inverts both the current and weekly percentage.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.65))
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 1)
+                }
             }
-            Section("Alerts") {
-                Picker("Deliver alerts as", selection: $settings.delivery) { Text("Top banner").tag(AlertDelivery.banner); Text("macOS notification").tag(AlertDelivery.notification) }
-                TextField("Idle after seconds", value: $settings.idleSeconds, format: .number).onChange(of: settings.idleSeconds) { _, _ in settings.save() }
-                Button("Send test alert", action: sendTestAlert)
-            }
-            agentSection("Claude", binding: $settings.claude)
-            agentSection("Codex", binding: $settings.codex)
-            Text("Both Claude’s and Codex’s percentages are the providers’ own real usage figures — Claude’s read from the Claude desktop app’s local cache, Codex’s read live from the \u{2018}codex\u{2019} CLI’s account status — not an estimate. The budget fields below are only used as a fallback if that real figure is ever unavailable. Weekly alerts use the trailing seven days; “Remaining” inverts both the current and weekly percentage.").font(.caption).foregroundStyle(.secondary)
+            .padding(20)
         }
-        .padding().frame(width: 470).navigationTitle("Limitly Settings")
+        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(width: 500, height: 700)
+        .navigationTitle("Limitly Settings")
     }
-    @ViewBuilder private func agentSection(_ name: String, binding: Binding<AgentSettings>) -> some View {
-        Section(name) {
-            Picker("Budget unit", selection: binding.budgetUnit) { ForEach(BudgetUnit.allCases, id: \.self) { Text($0.displayName).tag($0) } }.onChange(of: binding.budgetUnit.wrappedValue) { _, _ in settings.save() }
-            TextField("Usage budget", value: binding.budgetAmount, format: .number).onChange(of: binding.budgetAmount.wrappedValue) { _, _ in settings.save() }
-            TextField("Usage thresholds (%)", text: binding.thresholds).onChange(of: binding.thresholds.wrappedValue) { _, _ in settings.save() }
-            TextField("Weekly budget", value: binding.weeklyBudgetAmount, format: .number).onChange(of: binding.weeklyBudgetAmount.wrappedValue) { _, _ in settings.save() }
-            TextField("Weekly threshold (%)", value: binding.weeklyThreshold, format: .number).onChange(of: binding.weeklyThreshold.wrappedValue) { _, _ in settings.save() }
+
+    @ViewBuilder
+    private func agentSection(_ name: String, symbol: String, binding: Binding<AgentSettings>) -> some View {
+        settingsCard(title: name, symbol: symbol) {
+            settingRow("Budget unit") {
+                Picker("Budget unit", selection: binding.budgetUnit) {
+                    ForEach(BudgetUnit.allCases, id: \.self) {
+                        Text($0.displayName).tag($0)
+                    }
+                }
+                .labelsHidden()
+                .onChange(of: binding.budgetUnit.wrappedValue) { _, _ in settings.save() }
+            }
+
+            rowDivider
+
+            settingRow("Usage budget") {
+                TextField("Usage budget", value: binding.budgetAmount, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: binding.budgetAmount.wrappedValue) { _, _ in settings.save() }
+            }
+
+            rowDivider
+
+            settingRow("Usage thresholds (%)") {
+                TextField("Usage thresholds (%)", text: binding.thresholds)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: binding.thresholds.wrappedValue) { _, _ in settings.save() }
+            }
+
+            rowDivider
+
+            settingRow("Weekly budget") {
+                TextField("Weekly budget", value: binding.weeklyBudgetAmount, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: binding.weeklyBudgetAmount.wrappedValue) { _, _ in settings.save() }
+            }
+
+            rowDivider
+
+            settingRow("Weekly threshold (%)") {
+                TextField("Weekly threshold (%)", value: binding.weeklyThreshold, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: binding.weeklyThreshold.wrappedValue) { _, _ in settings.save() }
+            }
         }
+    }
+
+    private func settingsCard<Content: View>(
+        title: String,
+        symbol: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(Color.accentColor.opacity(0.13))
+                    )
+
+                Text(title)
+                    .font(.headline)
+                    .fontWeight(.semibold)
+            }
+
+            Divider()
+
+            VStack(spacing: 11) {
+                content()
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
+        }
+        .shadow(color: Color.primary.opacity(0.05), radius: 4, y: 1)
+    }
+
+    private func settingRow<Control: View>(
+        _ label: String,
+        @ViewBuilder control: () -> Control
+    ) -> some View {
+        HStack(spacing: 16) {
+            Text(label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(width: 165, alignment: .leading)
+
+            Spacer(minLength: 0)
+
+            control()
+                .frame(width: 210, alignment: .trailing)
+        }
+    }
+
+    private var rowDivider: some View {
+        Divider()
+            .padding(.leading, 181)
     }
 }
