@@ -200,16 +200,18 @@ private struct MenuContentView: View {
         .frame(width: 344)
     }
 
-    private func displayedPercentage(for agent: AgentID) -> Double? {
-        Double(monitor.percentageText(for: agent).dropLast())
-    }
-
+    // Deliberately grounded in the real used fraction, not
+    // `monitor.percentageText`'s displayed number — the "Show percentage
+    // as: Remaining" setting inverts the printed text, but a progress bar
+    // and its severity color must always reflect actual usage, or a user
+    // in "Remaining" mode would see a reassuring green, mostly-empty bar
+    // while sitting at 95% used.
     private func progressFraction(for agent: AgentID) -> CGFloat {
-        CGFloat(min(max(displayedPercentage(for: agent) ?? 0, 0), 100) / 100)
+        CGFloat(min(max(monitor.usedFraction(for: agent) ?? 0, 0), 100) / 100)
     }
 
     private func progressColor(for agent: AgentID) -> Color {
-        guard let percentage = displayedPercentage(for: agent) else { return .secondary }
+        guard let percentage = monitor.usedFraction(for: agent) else { return .secondary }
         if percentage >= 90 { return .red }
         if percentage >= 70 { return .orange }
         return .green
