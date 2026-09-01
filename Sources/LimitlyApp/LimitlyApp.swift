@@ -89,36 +89,130 @@ private struct MenuContentView: View {
     @ObservedObject var monitor: UsageMonitor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Limitly").font(.headline)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 7) {
+                Image(systemName: "chart.bar.fill")
+                    .foregroundStyle(.secondary)
+                Text("Limitly")
+                    .font(.title3.weight(.semibold))
+            }
+
             ForEach(AgentID.allCases, id: \.self) { agent in
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack {
-                        AgentGlyph(agent: agent, colorMode: monitor.settings.iconColor)
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack(spacing: 8) {
+                        AgentGlyph(agent: agent, colorMode: monitor.settings.iconColor, size: 20)
                         Text(agent.displayName)
+                            .font(.subheadline.weight(.semibold))
                         Spacer()
-                        Text(monitor.percentageText(for: agent)).monospacedDigit()
+                        Text(monitor.percentageText(for: agent))
+                            .font(.subheadline.weight(.semibold))
+                            .monospacedDigit()
+                            .foregroundStyle(progressColor(for: agent))
                     }
-                    Text(monitor.usageText(for: agent)).font(.caption).foregroundStyle(.secondary)
-                    if let reset = monitor.resetText(for: agent) { Text(reset).font(.caption).foregroundStyle(.secondary) }
+
+                    GeometryReader { geometry in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Color.secondary.opacity(0.16))
+                            Capsule()
+                                .fill(progressColor(for: agent))
+                                .frame(width: geometry.size.width * progressFraction(for: agent))
+                        }
+                    }
+                    .frame(height: 7)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(monitor.usageText(for: agent))
+                        if let reset = monitor.resetText(for: agent) {
+                            Text(reset)
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+                .padding(11)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 11, style: .continuous)
+                        .stroke(Color.secondary.opacity(0.12), lineWidth: 1)
                 }
             }
-            Divider()
-            Text("Weekly usage").font(.subheadline.weight(.semibold))
-            ForEach(AgentID.allCases, id: \.self) { agent in
-                HStack(spacing: 5) {
-                    AgentGlyph(agent: agent, colorMode: monitor.settings.iconColor, size: 17)
-                    Text(monitor.weeklyText(for: agent))
+
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Weekly usage", systemImage: "calendar")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                VStack(spacing: 0) {
+                    ForEach(Array(AgentID.allCases.enumerated()), id: \.element) { index, agent in
+                        HStack(spacing: 8) {
+                            AgentGlyph(agent: agent, colorMode: monitor.settings.iconColor, size: 16)
+                            Text(agent.displayName)
+                                .fontWeight(.medium)
+                            Spacer()
+                            Text(monitor.weeklyText(for: agent))
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+
+                        if index < AgentID.allCases.count - 1 {
+                            Divider()
+                                .padding(.leading, 34)
+                        }
+                    }
                 }
                 .font(.caption)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             }
-            if let error = monitor.lastError { Text(error).font(.caption).foregroundStyle(.red).lineLimit(2) }
+
+            if let error = monitor.lastError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
+
             Divider()
-            HStack { Button("Refresh") { monitor.refresh() }; Spacer(); SettingsLink { Text("Settings…") } }
-            Button("Quit Limitly") { NSApplication.shared.terminate(nil) }
+
+            HStack(spacing: 8) {
+                Button {
+                    monitor.refresh()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+
+                SettingsLink {
+                    Label("Settings…", systemImage: "gearshape")
+                }
+
+                Spacer()
+
+                Button("Quit Limitly") {
+                    NSApplication.shared.terminate(nil)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
-        .padding(14)
-        .frame(width: 300)
+        .padding(16)
+        .frame(width: 344)
+    }
+
+    private func displayedPercentage(for agent: AgentID) -> Double? {
+        Double(monitor.percentageText(for: agent).dropLast())
+    }
+
+    private func progressFraction(for agent: AgentID) -> CGFloat {
+        CGFloat(min(max(displayedPercentage(for: agent) ?? 0, 0), 100) / 100)
+    }
+
+    private func progressColor(for agent: AgentID) -> Color {
+        guard let percentage = displayedPercentage(for: agent) else { return .secondary }
+        if percentage >= 90 { return .red }
+        if percentage >= 70 { return .orange }
+        return .green
     }
 }
 
