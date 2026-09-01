@@ -201,7 +201,14 @@ private final class CodexRateLimitClient: @unchecked Sendable {
         return fetched ?? cached
     }
 
-    private static func probe(timeout: TimeInterval = 3) -> CodexRateLimitSnapshot? {
+    /// Newer `codex` builds drop the `account/rateLimits/read` request
+    /// on the floor if it (and `initialized`) arrive before the server has
+    /// finished replying to `initialize` — sending all three requests in one
+    /// blast (the previous approach) got silently ignored, which is why the
+    /// menu bar stopped showing a Codex percentage at all. Waiting for the
+    /// `"id":0` reply before writing the rest mirrors how a real client
+    /// drives the handshake and reliably gets a response.
+    private static func probe(timeout: TimeInterval = 5) -> CodexRateLimitSnapshot? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["codex", "app-server", "--listen", "stdio://"]
@@ -210,25 +217,41 @@ private final class CodexRateLimitClient: @unchecked Sendable {
         guard (try? process.run()) != nil else { return nil }
         defer { if process.isRunning { process.terminate() } }
 
-        let requests = [
-            #"{"method":"initialize","id":0,"params":{"clientInfo":{"name":"limitly","title":"Limitly","version":"1.0.0"}}}"#,
+        let initializeRequest = #"{"method":"initialize","id":0,"params":{"clientInfo":{"name":"limitly","title":"Limitly","version":"1.0.0"}}}"#
+        let followUpRequests = [
             #"{"method":"initialized","params":{}}"#,
             #"{"method":"account/rateLimits/read","id":2}"#
         ]
-        stdin.fileHandleForWriting.write(Data(requests.map { $0 + "\n" }.joined().utf8))
+        stdin.fileHandleForWriting.write(Data((initializeRequest + "\n").utf8))
 
         let box = OutputBox()
         let semaphore = DispatchSemaphore(value: 0)
         let handle = stdout.fileHandleForReading
+        let sentFollowUp = Locked(false)
         handle.readabilityHandler = { fh in
             let chunk = fh.availableData
             guard !chunk.isEmpty else { return }
             box.append(chunk)
+            if box.text.contains("\"id\":0") && sentFollowUp.trySet() {
+                stdin.fileHandleForWriting.write(Data(followUpRequests.map { $0 + "\n" }.joined().utf8))
+            }
             if box.text.contains("\"id\":2") { semaphore.signal() }
         }
         _ = semaphore.wait(timeout: .now() + timeout)
         handle.readabilityHandler = nil
         return CodexRateLimitParser.parse(box.text)
+    }
+
+    /// Guards the "have we already sent the follow-up requests" flag against
+    /// the readability handler firing again (with more buffered output)
+    /// before the first follow-up write completes.
+    private final class Locked: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ value: Bool) { self.value = value }
+        /// Sets the flag and returns whether this call was the one that
+        /// changed it from `false` to `true`.
+        func trySet() -> Bool { lock.lock(); defer { lock.unlock() }; if value { return false }; value = true; return true }
     }
 
     private final class OutputBox: @unchecked Sendable {

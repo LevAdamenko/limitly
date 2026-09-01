@@ -30,11 +30,17 @@ public enum CodexRateLimitParser {
             guard let data = line.data(using: .utf8),
                   let response = try? JSONDecoder().decode(RPCResponse.self, from: data),
                   response.id == 2,
-                  let limits = response.result?.rateLimits else { continue }
+                  let limits = response.result?.rateLimits,
+                  // A `null` primary window means the app-server has no real
+                  // data yet (e.g. right after wake, before it's reconnected)
+                  // — treat that as "no update" rather than defaulting to a
+                  // false 0%, which would otherwise get cached for
+                  // `refreshInterval` and clobber the last known-good value.
+                  let primary = limits.primary else { continue }
             return CodexRateLimitSnapshot(
-                fiveHourPercent: limits.primary?.usedPercent ?? 0,
+                fiveHourPercent: primary.usedPercent,
                 weeklyPercent: limits.secondary?.usedPercent ?? 0,
-                sessionResetTime: limits.primary?.resetsAt.map { Date(timeIntervalSince1970: Double($0)) },
+                sessionResetTime: primary.resetsAt.map { Date(timeIntervalSince1970: Double($0)) },
                 weeklyResetTime: limits.secondary?.resetsAt.map { Date(timeIntervalSince1970: Double($0)) }
             )
         }

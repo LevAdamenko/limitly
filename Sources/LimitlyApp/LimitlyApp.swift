@@ -54,17 +54,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let button = statusItem?.button else { return }
         let font = NSFont.menuBarFont(ofSize: 0)
         let iconSize: CGFloat = 17
-        // Vertically centers the icon on the title's text baseline.
-        let baselineOffset = (font.capHeight - iconSize) / 2
 
         let title = NSMutableAttributedString()
         for (index, agent) in AgentID.allCases.enumerated() {
             if index > 0 { title.append(NSAttributedString(string: "  ")) }
             let attachment = NSTextAttachment()
             let image = AgentGlyphImages.image(for: agent, colorMode: monitor.settings.iconColor).copy() as! NSImage
-            image.size = NSSize(width: iconSize, height: iconSize)
+            let renderedSize = iconSize * AgentGlyphImages.sizeMultiplier(for: agent)
+            image.size = NSSize(width: renderedSize, height: renderedSize)
             attachment.image = image
-            attachment.bounds = CGRect(x: 0, y: baselineOffset, width: iconSize, height: iconSize)
+            // Vertically centers the icon on the title's text baseline.
+            let baselineOffset = (font.capHeight - renderedSize) / 2
+            attachment.bounds = CGRect(x: 0, y: baselineOffset, width: renderedSize, height: renderedSize)
             title.append(NSAttributedString(attachment: attachment))
             title.append(NSAttributedString(
                 string: " \(monitor.percentageText(for: agent))",
@@ -131,18 +132,27 @@ private struct AgentGlyph: View {
     var size: CGFloat = 19
 
     var body: some View {
+        let renderedSize = size * AgentGlyphImages.sizeMultiplier(for: agent)
         Image(nsImage: AgentGlyphImages.image(for: agent, colorMode: colorMode))
             .renderingMode(.template)
             .resizable()
             .aspectRatio(contentMode: .fit)
-            .frame(width: size, height: size)
+            .frame(width: renderedSize, height: renderedSize)
             .accessibilityLabel(agent.displayName)
     }
 }
 
 private enum AgentGlyphImages {
     static let claudeBase = localOverride(named: "ClaudeIcon") ?? symbolImage(named: "sparkle", accessibilityDescription: "Claude")
-    static let codexBase = localOverride(named: "CodexIcon") ?? symbolImage(named: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Codex")
+    /// The official Codex mark's local PNG override bakes a lit-3D-sphere
+    /// shading gradient into its own alpha channel (verified pixel-by-pixel:
+    /// not ordinary antialiasing, and not recoverable as a flat silhouette
+    /// by any per-pixel filter — thresholding produces a "moon phase" cutout
+    /// because part of the shading genuinely fades to near-zero alpha same
+    /// as the true background). Rather than load that file's pixels, its
+    /// mere presence is used as an opt-in signal for a small hand-drawn flat
+    /// vector mark instead, which sidesteps the problem entirely.
+    static let codexBase = hasLocalOverride(named: "CodexIcon") ? codexVectorGlyph() : symbolImage(named: "chevron.left.forwardslash.chevron.right", accessibilityDescription: "Codex")
 
     /// `.automatic` keeps the image a template (macOS adapts it to light/dark
     /// menu bars); `.black`/`.white` bake in a specific color instead, so it
@@ -156,6 +166,14 @@ private enum AgentGlyphImages {
         }
     }
 
+    /// The Claude mark (a thin sparkle/asterisk) has much more built-in
+    /// transparent padding around its silhouette than the Codex mark (a
+    /// disc that nearly fills its canvas), so at matching frame sizes
+    /// Claude visibly renders smaller. Scaling its frame up compensates —
+    /// the extra padding scales with it, but so does the visible glyph.
+    static func sizeMultiplier(for agent: AgentID) -> CGFloat { agent == .claude ? 1.4 : 0.9 }
+
+    /// `destinationIn` masks the tint color by `image`'s own alpha channel.
     private static func tinted(_ image: NSImage, color: NSColor) -> NSImage {
         let size = image.size
         let result = NSImage(size: size)
@@ -184,6 +202,64 @@ private enum AgentGlyphImages {
         let sourceDirectory = (#filePath as NSString).deletingLastPathComponent
         let path = "\(sourceDirectory)/Resources/\(name).png"
         guard FileManager.default.fileExists(atPath: path), let image = NSImage(contentsOfFile: path) else { return nil }
+        image.isTemplate = true
+        return image
+    }
+
+    /// Same from-source-only local check as `localOverride`, but only
+    /// tests for the file's presence — the caller draws its own glyph
+    /// rather than loading this file's pixels. See `codexBase`.
+    private static func hasLocalOverride(named name: String) -> Bool {
+        let sourceDirectory = (#filePath as NSString).deletingLastPathComponent
+        return FileManager.default.fileExists(atPath: "\(sourceDirectory)/Resources/\(name).png")
+    }
+
+    /// A small flat vector nod to the Codex mark — a scalloped "cloud" blob
+    /// (the real icon's outline, built from overlapping circles rather than
+    /// a plain disc) with a left-of-center chevron and trailing bar punched
+    /// out, evoking a terminal prompt (`>_`). Every pixel is either fully
+    /// opaque or fully transparent, so it tints and downscales cleanly at
+    /// any menu-bar size, unlike the shaded PNG it replaces (see
+    /// `codexBase`). Punching the glyph out of the blob (rather than
+    /// drawing it in a second color) is the standard technique for a
+    /// single-tint template icon, matching how the original reads as a
+    /// light glyph on a colored blob.
+    private static func codexVectorGlyph() -> NSImage {
+        let canvas = NSSize(width: 88, height: 88)
+        let image = NSImage(size: canvas)
+        image.lockFocus()
+
+        NSColor.black.setFill()
+        let center = NSPoint(x: 44, y: 44)
+        let mainRadius: CGFloat = 27
+        NSBezierPath(ovalIn: NSRect(x: center.x - mainRadius, y: center.y - mainRadius, width: mainRadius * 2, height: mainRadius * 2)).fill()
+        let bumpCount = 8
+        let bumpRadius: CGFloat = 15
+        let bumpDistance: CGFloat = 27
+        for i in 0..<bumpCount {
+            let angle = (CGFloat(i) / CGFloat(bumpCount)) * 2 * .pi + .pi / 2
+            let x = center.x + bumpDistance * cos(angle)
+            let y = center.y + bumpDistance * sin(angle)
+            NSBezierPath(ovalIn: NSRect(x: x - bumpRadius, y: y - bumpRadius, width: bumpRadius * 2, height: bumpRadius * 2)).fill()
+        }
+
+        NSGraphicsContext.current?.compositingOperation = .destinationOut
+        NSColor.black.setStroke()
+        NSColor.black.setFill()
+
+        let chevron = NSBezierPath()
+        chevron.move(to: NSPoint(x: 26, y: 58))
+        chevron.line(to: NSPoint(x: 43, y: 44))
+        chevron.line(to: NSPoint(x: 26, y: 30))
+        chevron.lineWidth = 9
+        chevron.lineCapStyle = .round
+        chevron.lineJoinStyle = .round
+        chevron.stroke()
+
+        NSBezierPath(roundedRect: NSRect(x: 48, y: 27, width: 20, height: 8), xRadius: 4, yRadius: 4).fill()
+
+        NSGraphicsContext.current?.compositingOperation = .sourceOver
+        image.unlockFocus()
         image.isTemplate = true
         return image
     }
