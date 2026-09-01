@@ -5,7 +5,25 @@ import SwiftUI
 final class BannerController {
     private var panel: NSPanel?
     private var dismissWorkItem: DispatchWorkItem?
+    private var pending: [(title: String, body: String, onClick: (() -> Void)?)] = []
+    private var isShowing = false
+
+    /// Queues rather than shows immediately if a banner is already up —
+    /// the panel is a single reused window, so a second `show()` call
+    /// arriving before the first banner's 6s auto-dismiss (e.g. a
+    /// threshold alert and a weekly alert both firing out of the same
+    /// synchronous refresh pass) used to silently overwrite it before the
+    /// user ever saw it.
     func show(title: String, body: String, onClick: (() -> Void)? = nil) {
+        guard !isShowing else {
+            pending.append((title, body, onClick))
+            return
+        }
+        present(title: title, body: body, onClick: onClick)
+    }
+
+    private func present(title: String, body: String, onClick: (() -> Void)?) {
+        isShowing = true
         dismissWorkItem?.cancel()
         let view = BannerView(title: title, message: body, onClick: onClick)
         let host = NSHostingView(rootView: view)
@@ -38,7 +56,19 @@ final class BannerController {
         // the cursor. Playing a specific named sound directly is a plain
         // audio call with no such side effects.
         NSSound(named: "Glass")?.play()
-        let item = DispatchWorkItem { [weak panel] in panel?.orderOut(nil) }; dismissWorkItem = item; DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: item)
+        let item = DispatchWorkItem { [weak self, weak panel] in
+            panel?.orderOut(nil)
+            self?.advanceQueue()
+        }
+        dismissWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: item)
+    }
+
+    private func advanceQueue() {
+        isShowing = false
+        guard !pending.isEmpty else { return }
+        let next = pending.removeFirst()
+        present(title: next.title, body: next.body, onClick: next.onClick)
     }
 }
 

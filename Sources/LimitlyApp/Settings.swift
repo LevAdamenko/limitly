@@ -107,6 +107,7 @@ struct SettingsView: View {
                             Text("macOS notification").tag(AlertDelivery.notification)
                         }
                         .labelsHidden()
+                        .onChange(of: settings.delivery) { _, _ in settings.save() }
                     }
 
                     rowDivider

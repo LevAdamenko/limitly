@@ -172,11 +172,25 @@ private enum CCUsageClient {
         } catch {
             ccusageError = error
         }
-        let blocks = (try? run(["--yes", ccusagePackage, "blocks", "--json", "--active", "--offline"]))
-            .flatMap { try? parser.parseBlocks($0) } ?? []
+        var blocksFetchSucceeded = false
+        var blocks: [SessionBlock] = []
+        if let blocksData = try? run(["--yes", ccusagePackage, "blocks", "--json", "--active", "--offline"]),
+           let parsedBlocks = try? parser.parseBlocks(blocksData) {
+            blocksFetchSucceeded = true
+            blocks = parsedBlocks
+        }
         let activeBlock = blocks.first(where: \.isActive)
         var currentUsage = parser.usages(on: now, rows: rows, calendar: calendar)
-        currentUsage[.claude] = activeBlock?.usage ?? UsageTotals(totalTokens: 0, totalCost: 0)
+        if let activeBlock {
+            currentUsage[.claude] = activeBlock.usage
+        } else if blocksFetchSucceeded {
+            // Genuinely no active session, as opposed to the `blocks`
+            // subprocess call itself failing (network hiccup, non-zero
+            // exit, bad JSON) — in that failure case, overwriting with a
+            // hard zero would visibly contradict a real non-zero percent
+            // shown from the independent Claude desktop cache.
+            currentUsage[.claude] = UsageTotals(totalTokens: 0, totalCost: 0)
+        }
         var resetTimes: [AgentID: Date] = [:]
         if let reset = activeBlock?.endTime { resetTimes[.claude] = reset }
 
@@ -189,7 +203,7 @@ private enum CCUsageClient {
         }
         if let real = CodexRateLimitClient.shared.currentSnapshot() {
             realCurrentPercentages[.codex] = real.fiveHourPercent
-            realWeeklyPercentages[.codex] = real.weeklyPercent
+            if let weeklyPercent = real.weeklyPercent { realWeeklyPercentages[.codex] = weeklyPercent }
             if let reset = real.sessionResetTime { resetTimes[.codex] = reset }
         }
 
@@ -227,7 +241,7 @@ private enum CCUsageClient {
         group.enter(); DispatchQueue.global(qos: .utility).async { errorData = errors.fileHandleForReading.readDataToEndOfFile(); group.leave() }
 
         guard group.wait(timeout: .now() + timeout) == .success else {
-            if process.isRunning { process.terminate() }
+            if process.isRunning { process.terminate(); process.waitUntilExit() }
             throw ClientError.failed("ccusage timed out after \(Int(timeout))s")
         }
         process.waitUntilExit()

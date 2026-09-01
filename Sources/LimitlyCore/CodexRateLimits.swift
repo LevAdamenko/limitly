@@ -7,11 +7,11 @@ import Foundation
 /// `secondary` is the ~7-day weekly window.
 public struct CodexRateLimitSnapshot: Equatable, Sendable {
     public let fiveHourPercent: Double
-    public let weeklyPercent: Double
+    public let weeklyPercent: Double?
     public let sessionResetTime: Date?
     public let weeklyResetTime: Date?
 
-    public init(fiveHourPercent: Double, weeklyPercent: Double, sessionResetTime: Date?, weeklyResetTime: Date?) {
+    public init(fiveHourPercent: Double, weeklyPercent: Double?, sessionResetTime: Date?, weeklyResetTime: Date?) {
         self.fiveHourPercent = fiveHourPercent
         self.weeklyPercent = weeklyPercent
         self.sessionResetTime = sessionResetTime
@@ -39,7 +39,11 @@ public enum CodexRateLimitParser {
                   let primary = limits.primary else { continue }
             return CodexRateLimitSnapshot(
                 fiveHourPercent: primary.usedPercent,
-                weeklyPercent: limits.secondary?.usedPercent ?? 0,
+                // Missing `secondary` (e.g. a plan without a weekly window,
+                // or a transient partial response) means "no data" — same
+                // reasoning as the `primary` guard above. Defaulting to 0
+                // here would mask a real near-threshold weekly usage.
+                weeklyPercent: limits.secondary?.usedPercent,
                 sessionResetTime: primary.resetsAt.map { Date(timeIntervalSince1970: Double($0)) },
                 weeklyResetTime: limits.secondary?.resetsAt.map { Date(timeIntervalSince1970: Double($0)) }
             )

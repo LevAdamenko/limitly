@@ -44,7 +44,16 @@ enum GhosttyController {
         }
     }
 
+    /// `workingDirectory` was normalized (via `standardizedFileURL.path`) by
+    /// `openTerminals()` when this value was first captured, but Ghostty's
+    /// own live "working directory of term" string here isn't run through
+    /// the same normalization — so both sides strip a trailing slash before
+    /// comparing, which is the one mismatch a standardized path can
+    /// actually introduce here (`standardizedFileURL` doesn't resolve
+    /// symlinks or change case, just path syntax).
     static func focusTerminal(workingDirectory: String) {
+        var target = workingDirectory
+        if target.hasSuffix("/") { target.removeLast() }
         let script = #"""
         on run argv
             if application "Ghostty" is not running then return
@@ -54,7 +63,9 @@ enum GhosttyController {
                     repeat with t in tabs of w
                         repeat with term in terminals of t
                             try
-                                if (working directory of term as text) is targetDirectory then
+                                set liveDirectory to (working directory of term as text)
+                                if liveDirectory ends with "/" then set liveDirectory to text 1 thru -2 of liveDirectory
+                                if liveDirectory is targetDirectory then
                                     focus term
                                     return
                                 end if
@@ -65,7 +76,7 @@ enum GhosttyController {
             end tell
         end run
         """#
-        _ = runAppleScript(script, arguments: [workingDirectory])
+        _ = runAppleScript(script, arguments: [target])
     }
 
     /// `osascript` is bounded because this is sampled frequently and an
