@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import UserNotifications
 import LimitlyCore
 
 @main
@@ -25,12 +26,14 @@ struct LimitlyApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let monitor = UsageMonitor()
+    private let notificationDelegate = LimitlyNotificationDelegate()
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var snapshotCancellable: AnyCancellable?
     private var iconColorCancellable: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UNUserNotificationCenter.current().delegate = notificationDelegate
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(togglePopover)
@@ -83,6 +86,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
+    }
+}
+
+private final class LimitlyNotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        defer { completionHandler() }
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+              let workingDirectory = response.notification.request.content.userInfo[
+                IdleNotificationUserInfo.workingDirectory
+              ] as? String else { return }
+        Task.detached { GhosttyController.focusTerminal(workingDirectory: workingDirectory) }
     }
 }
 

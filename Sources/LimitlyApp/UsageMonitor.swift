@@ -11,6 +11,7 @@ final class UsageMonitor: ObservableObject {
     private var thresholdDetector = ThresholdDetector()
     private var weeklyDetector = WeeklyThresholdDetector()
     private var activityTracker = ActivityTracker()
+    private var sessionActivityTracker = SessionActivityTracker()
     private var timer: Timer?
     private let banner = BannerController()
     /// `refresh()` shells out to `npx ccusage` (and, for Codex, spawns
@@ -59,21 +60,41 @@ final class UsageMonitor: ObservableObject {
         Task.detached { [weak self] in
             do {
                 let result = try CCUsageClient.fetch()
-                await self?.apply(result)
+                let terminals = GhosttyController.openTerminals()
+                await self?.apply(result, terminals: terminals)
             } catch { await self?.record(error) }
         }
     }
 
-    private func apply(_ result: UsageSnapshot) {
+    private func apply(_ result: UsageSnapshot, terminals: [GhosttyTerminal]) {
         isRefreshing = false
         snapshot = result; lastError = nil
+        let now = Date()
         let dailyPercentages = percentages(result)
         let weeklyPercentages = weeklyPercentages(result)
         let thresholdEvents = thresholdDetector.observe(percentages: dailyPercentages, thresholds: Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, settings.thresholds(for: $0)) }))
         let weeklyEvents = weeklyDetector.observe(percentages: weeklyPercentages, thresholds: Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, settings.config(for: $0).weeklyThreshold) }))
-        let idleEvents = activityTracker.observe(usages: result.currentUsage, at: Date(), idleInterval: settings.idleSeconds)
+        let candidates = terminals.flatMap { terminal in
+            AgentID.allCases.map {
+                SessionCandidate(agent: $0, workingDirectory: terminal.workingDirectory, tabTitle: terminal.title)
+            }
+        }
+        let sessionObservation = sessionActivityTracker.observe(
+            candidates: candidates,
+            at: now,
+            idleInterval: settings.idleSeconds
+        )
+        let fallbackUsages = result.currentUsage.filter { !sessionObservation.matchedAgents.contains($0.key) }
+        let idleEvents = activityTracker.observe(usages: fallbackUsages, at: now, idleInterval: settings.idleSeconds)
         for event in thresholdEvents { deliver(title: "\(event.agent.displayName) usage alert", body: "Current usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).") }
         for event in weeklyEvents { deliver(title: "\(event.agent.displayName) weekly usage alert", body: "Trailing 7-day usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).") }
+        for event in sessionObservation.idleEvents {
+            deliver(
+                title: "\(event.agent.displayName) is idle",
+                body: "No new activity in \"\(event.tabTitle)\" for \(Int(settings.idleSeconds))s.",
+                workingDirectory: event.workingDirectory
+            )
+        }
         for event in idleEvents { deliver(title: "\(event.agent.displayName) is idle", body: "No new usage has appeared for \(Int(settings.idleSeconds)) seconds.") }
     }
     private func record(_ error: Error) { isRefreshing = false; lastError = "ccusage refresh failed: \(error.localizedDescription)" }
@@ -92,7 +113,27 @@ final class UsageMonitor: ObservableObject {
         })
     }
     private func format(_ usage: UsageTotals, unit: BudgetUnit) -> String { switch unit { case .tokens: return "\(usage.totalTokens.formatted()) tokens"; case .dollars: return usage.totalCost.formatted(.currency(code: "USD")) } }
-    private func deliver(title: String, body: String) { if settings.delivery == .banner { banner.show(title: title, body: body) } else { UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }; let content = UNMutableNotificationContent(); content.title = title; content.body = body; content.sound = .default; let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil); UNUserNotificationCenter.current().add(request) } }
+    private func deliver(title: String, body: String, workingDirectory: String? = nil) {
+        if settings.delivery == .banner {
+            let onClick: (() -> Void)? = workingDirectory.map { directory in
+                {
+                    _ = Task.detached { GhosttyController.focusTerminal(workingDirectory: directory) }
+                }
+            }
+            banner.show(title: title, body: body, onClick: onClick)
+        } else {
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            if let workingDirectory {
+                content.userInfo[IdleNotificationUserInfo.workingDirectory] = workingDirectory
+            }
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        }
+    }
 }
 
 private enum CCUsageClient {

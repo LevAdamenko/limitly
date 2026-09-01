@@ -5,9 +5,9 @@ import SwiftUI
 final class BannerController {
     private var panel: NSPanel?
     private var dismissWorkItem: DispatchWorkItem?
-    func show(title: String, body: String) {
+    func show(title: String, body: String, onClick: (() -> Void)? = nil) {
         dismissWorkItem?.cancel()
-        let view = BannerView(title: title, message: body)
+        let view = BannerView(title: title, message: body, onClick: onClick)
         let host = NSHostingView(rootView: view)
         let size = host.fittingSize
         let width = size.width; let height = size.height
@@ -44,11 +44,31 @@ final class BannerController {
 
 private struct BannerView: View {
     let title: String; let message: String
+    let onClick: (() -> Void)?
     // `minWidth` is applied here, before `.background`, so the visible
     // rounded-rect grows (and its short-text content re-centers) to fill
     // that minimum — putting a `max(360, ...)` on the AppKit window's width
     // instead left the window wider than the actual SwiftUI content, which
     // sat pinned to the window's leading edge, throwing the *visible*
     // banner off-center from the window frame it was centered by.
-    var body: some View { VStack(alignment: .leading, spacing: 4) { Text(title).font(.headline); Text(message).font(.subheadline).foregroundStyle(.secondary) }.padding(.horizontal, 20).padding(.vertical, 14).frame(minWidth: 360, minHeight: 74).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14)) }
+    var body: some View {
+        if let onClick {
+            content
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onClick)
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.headline)
+            Text(message).font(.subheadline).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .frame(minWidth: 360, minHeight: 74)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
 }
