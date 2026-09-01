@@ -53,6 +53,7 @@ final class SettingsStore: ObservableObject {
     @Published var codex = AgentSettings()
     @Published var delivery: AlertDelivery = .banner
     @Published var idleSeconds: Double = 60
+    @Published var idleNotificationsEnabled: Bool = true
     @Published var percentageDisplay: PercentageDisplayMode = .used
     @Published var iconColor: IconColorMode = .automatic
     private let key = "Limitly.Settings.v1"
@@ -63,9 +64,9 @@ final class SettingsStore: ObservableObject {
     func weeklyBudget(for agent: AgentID) -> UsageBudget { let c = config(for: agent); return UsageBudget(unit: c.budgetUnit, amount: c.weeklyBudgetAmount) }
     func thresholds(for agent: AgentID) -> [Double] { config(for: agent).thresholds.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) } }
     func displayed(_ percentage: Double) -> Double { percentageDisplay == .used ? percentage : max(0, 100 - percentage) }
-    func save() { let value = Persisted(claude: claude, codex: codex, delivery: delivery, idleSeconds: idleSeconds, percentageDisplay: percentageDisplay, iconColor: iconColor); if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) } }
-    private func load() { guard let data = UserDefaults.standard.data(forKey: key), let value = try? JSONDecoder().decode(Persisted.self, from: data) else { return }; claude = value.claude; codex = value.codex; delivery = value.delivery; idleSeconds = value.idleSeconds; percentageDisplay = value.percentageDisplay ?? .used; iconColor = value.iconColor ?? .automatic }
-    private struct Persisted: Codable { var claude: AgentSettings; var codex: AgentSettings; var delivery: AlertDelivery; var idleSeconds: Double; var percentageDisplay: PercentageDisplayMode?; var iconColor: IconColorMode? }
+    func save() { let value = Persisted(claude: claude, codex: codex, delivery: delivery, idleSeconds: idleSeconds, idleNotificationsEnabled: idleNotificationsEnabled, percentageDisplay: percentageDisplay, iconColor: iconColor); if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) } }
+    private func load() { guard let data = UserDefaults.standard.data(forKey: key), let value = try? JSONDecoder().decode(Persisted.self, from: data) else { return }; claude = value.claude; codex = value.codex; delivery = value.delivery; idleSeconds = value.idleSeconds; idleNotificationsEnabled = value.idleNotificationsEnabled ?? true; percentageDisplay = value.percentageDisplay ?? .used; iconColor = value.iconColor ?? .automatic }
+    private struct Persisted: Codable { var claude: AgentSettings; var codex: AgentSettings; var delivery: AlertDelivery; var idleSeconds: Double; var idleNotificationsEnabled: Bool?; var percentageDisplay: PercentageDisplayMode?; var iconColor: IconColorMode? }
 }
 
 struct SettingsView: View {
@@ -110,9 +111,19 @@ struct SettingsView: View {
 
                     rowDivider
 
+                    settingRow("Notify when idle") {
+                        Toggle("Notify when idle", isOn: $settings.idleNotificationsEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .onChange(of: settings.idleNotificationsEnabled) { _, _ in settings.save() }
+                    }
+
+                    rowDivider
+
                     settingRow("Idle after seconds") {
                         TextField("Idle after seconds", value: $settings.idleSeconds, format: .number)
                             .textFieldStyle(.roundedBorder)
+                            .disabled(!settings.idleNotificationsEnabled)
                             .onChange(of: settings.idleSeconds) { _, _ in settings.save() }
                     }
 

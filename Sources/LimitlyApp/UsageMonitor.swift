@@ -57,10 +57,14 @@ final class UsageMonitor: ObservableObject {
     func refresh() {
         guard !isRefreshing else { return }
         isRefreshing = true
+        let idleNotificationsEnabled = settings.idleNotificationsEnabled
         Task.detached { [weak self] in
             do {
                 let result = try CCUsageClient.fetch()
-                let terminals = GhosttyController.openTerminals()
+                // Skip the AppleScript round-trip entirely when idle
+                // notifications are off — no point paying for it on every
+                // 5-second refresh if nothing will use it.
+                let terminals = idleNotificationsEnabled ? GhosttyController.openTerminals() : []
                 await self?.apply(result, terminals: terminals)
             } catch { await self?.record(error) }
         }
@@ -74,28 +78,30 @@ final class UsageMonitor: ObservableObject {
         let weeklyPercentages = weeklyPercentages(result)
         let thresholdEvents = thresholdDetector.observe(percentages: dailyPercentages, thresholds: Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, settings.thresholds(for: $0)) }))
         let weeklyEvents = weeklyDetector.observe(percentages: weeklyPercentages, thresholds: Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, settings.config(for: $0).weeklyThreshold) }))
-        let candidates = terminals.flatMap { terminal in
-            AgentID.allCases.map {
-                SessionCandidate(agent: $0, workingDirectory: terminal.workingDirectory, tabTitle: terminal.title)
-            }
-        }
-        let sessionObservation = sessionActivityTracker.observe(
-            candidates: candidates,
-            at: now,
-            idleInterval: settings.idleSeconds
-        )
-        let fallbackUsages = result.currentUsage.filter { !sessionObservation.matchedAgents.contains($0.key) }
-        let idleEvents = activityTracker.observe(usages: fallbackUsages, at: now, idleInterval: settings.idleSeconds)
         for event in thresholdEvents { deliver(title: "\(event.agent.displayName) usage alert", body: "Current usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).") }
         for event in weeklyEvents { deliver(title: "\(event.agent.displayName) weekly usage alert", body: "Trailing 7-day usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).") }
-        for event in sessionObservation.idleEvents {
-            deliver(
-                title: "\(event.agent.displayName) is idle",
-                body: "No new activity in \"\(event.tabTitle)\" for \(Int(settings.idleSeconds))s.",
-                workingDirectory: event.workingDirectory
+        if settings.idleNotificationsEnabled {
+            let candidates = terminals.flatMap { terminal in
+                AgentID.allCases.map {
+                    SessionCandidate(agent: $0, workingDirectory: terminal.workingDirectory, tabTitle: terminal.title)
+                }
+            }
+            let sessionObservation = sessionActivityTracker.observe(
+                candidates: candidates,
+                at: now,
+                idleInterval: settings.idleSeconds
             )
+            let fallbackUsages = result.currentUsage.filter { !sessionObservation.matchedAgents.contains($0.key) }
+            let idleEvents = activityTracker.observe(usages: fallbackUsages, at: now, idleInterval: settings.idleSeconds)
+            for event in sessionObservation.idleEvents {
+                deliver(
+                    title: "\(event.agent.displayName) is idle",
+                    body: "No new activity in \"\(event.tabTitle)\" for \(Int(settings.idleSeconds))s.",
+                    workingDirectory: event.workingDirectory
+                )
+            }
+            for event in idleEvents { deliver(title: "\(event.agent.displayName) is idle", body: "No new usage has appeared for \(Int(settings.idleSeconds)) seconds.") }
         }
-        for event in idleEvents { deliver(title: "\(event.agent.displayName) is idle", body: "No new usage has appeared for \(Int(settings.idleSeconds)) seconds.") }
     }
     private func record(_ error: Error) { isRefreshing = false; lastError = "ccusage refresh failed: \(error.localizedDescription)" }
     private func percentages(_ snapshot: UsageSnapshot) -> [AgentID: Double] {
