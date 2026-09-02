@@ -24,13 +24,15 @@ struct LimitlyApp: App {
 /// AppKit's NSAttributedString/NSTextAttachment title composition is the
 /// same mechanism every other real menu-bar app already uses successfully.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     let monitor = UsageMonitor()
     private let notificationDelegate = LimitlyNotificationDelegate()
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var snapshotCancellable: AnyCancellable?
     private var iconColorCancellable: AnyCancellable?
+    private var globalClickMonitor: Any?
+    private var localClickMonitor: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = notificationDelegate
@@ -41,6 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let pop = NSPopover()
         pop.behavior = .transient
+        pop.delegate = self
         pop.contentViewController = NSHostingController(rootView: MenuContentView(monitor: monitor))
         popover = pop
 
@@ -82,9 +85,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func togglePopover() {
         guard let button = statusItem?.button, let pop = popover else { return }
         if pop.isShown {
-            pop.performClose(nil)
+            closePopover()
         } else {
             pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            startOutsideClickMonitor()
+        }
+    }
+
+    private func closePopover() {
+        popover?.performClose(nil)
+        stopOutsideClickMonitor()
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopOutsideClickMonitor()
+    }
+
+    /// `NSPopover`'s built-in `.transient` auto-dismiss is driven by
+    /// AppKit's own outside-click tracking, which is unreliable for an
+    /// accessory (LSUIElement, no Dock icon) app — most visibly, a click in
+    /// *another* app's window on a different fullscreen Space (the status
+    /// item and its popover are visible there since status items float
+    /// above every Space, but the click itself doesn't reliably register as
+    /// "outside the popover" and the popover is left hanging open). Manual
+    /// event monitors are the standard workaround: a global monitor catches
+    /// clicks anywhere in any other app, and a local monitor catches clicks
+    /// in this app's own other windows (e.g. Settings) — both just
+    /// force-close the popover.
+    private func startOutsideClickMonitor() {
+        guard globalClickMonitor == nil else { return }
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown]
+        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] _ in
+            self?.closePopover()
+        }
+        localClickMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            guard let self else { return event }
+            // Exclude clicks on the popover's own content and on the status
+            // item button — the button already toggles via its own action,
+            // so closing it here too would immediately reopen it.
+            let popoverWindow = self.popover?.contentViewController?.view.window
+            let statusButtonWindow = self.statusItem?.button?.window
+            if event.window !== popoverWindow && event.window !== statusButtonWindow {
+                self.closePopover()
+            }
+            return event
+        }
+    }
+
+    private func stopOutsideClickMonitor() {
+        if let monitor = globalClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalClickMonitor = nil
+        }
+        if let monitor = localClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            localClickMonitor = nil
         }
     }
 }
