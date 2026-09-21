@@ -18,7 +18,7 @@ final class UsageMonitor: ObservableObject {
     /// `codex app-server`); guarding against overlap keeps a single slow
     /// call from letting the 5-second timer pile up concurrent subprocesses
     /// that all contend for npm's shared package-install lock.
-    private var isRefreshing = false
+    @Published private(set) var isRefreshing = false
 
     init() {
         refresh()
@@ -54,13 +54,18 @@ final class UsageMonitor: ObservableObject {
     /// waiting for real usage to cross a threshold.
     func sendTestAlert() { deliver(title: "Limitly test alert", body: "This is what a usage alert looks like.") }
 
-    func refresh() {
+    /// `force` bypasses `CodexRateLimitClient`'s 90-second cache — the
+    /// automatic 5-second timer never sets it (that cache is what keeps
+    /// polling cheap), but the manual Refresh button does, since silently
+    /// returning the same cached Codex numbers made the button look like it
+    /// wasn't doing anything.
+    func refresh(force: Bool = false) {
         guard !isRefreshing else { return }
         isRefreshing = true
         let idleNotificationsEnabled = settings.idleNotificationsEnabled
         Task.detached { [weak self] in
             do {
-                let result = try CCUsageClient.fetch()
+                let result = try CCUsageClient.fetch(forceCodexRefresh: force)
                 // Skip the AppleScript round-trip entirely when idle
                 // notifications are off — no point paying for it on every
                 // 5-second refresh if nothing will use it.
@@ -160,7 +165,7 @@ private enum CCUsageClient {
     /// so `@latest` was making this fail on every single 5-second refresh.
     private static let ccusagePackage = "ccusage@20.0.20"
 
-    static func fetch(now: Date = Date()) throws -> UsageSnapshot {
+    static func fetch(now: Date = Date(), forceCodexRefresh: Bool = false) throws -> UsageSnapshot {
         let calendar = Calendar.current
         let since = calendar.date(byAdding: .day, value: -6, to: now) ?? now
         let formatter = DateFormatter(); formatter.calendar = calendar; formatter.dateFormat = "yyyy-MM-dd"
@@ -206,9 +211,19 @@ private enum CCUsageClient {
         if let real = ClaudeDesktopUsageClient.currentSnapshot() {
             realCurrentPercentages[.claude] = real.fiveHourPercent
             realWeeklyPercentages[.claude] = real.sevenDayPercent
-            resetTimes[.claude] = real.sessionResetTime
+            // `resetTimes[.claude]` may already hold `activeBlock?.endTime`
+            // above — real message timestamps from ccusage's blocks, quantized
+            // the same way Anthropic's own 5-hour window is. That's strictly
+            // more precise than this heuristic guess (scanning ~15-minute
+            // desktop-app percentage samples for where the value drops), so
+            // it must win when both are available; only fall back to the
+            // heuristic when ccusage found no active block (e.g. the account
+            // has no local Claude Code CLI logs for `blocks` to read).
+            if resetTimes[.claude] == nil {
+                resetTimes[.claude] = real.sessionResetTime
+            }
         }
-        if let real = CodexRateLimitClient.shared.currentSnapshot() {
+        if let real = CodexRateLimitClient.shared.currentSnapshot(forceRefresh: forceCodexRefresh) {
             realCurrentPercentages[.codex] = real.fiveHourPercent
             if let weeklyPercent = real.weeklyPercent { realWeeklyPercentages[.codex] = weeklyPercent }
             if let reset = real.sessionResetTime { resetTimes[.codex] = reset }
@@ -289,9 +304,9 @@ private final class CodexRateLimitClient: @unchecked Sendable {
     private var lastFetch: Date?
     private let refreshInterval: TimeInterval = 90
 
-    func currentSnapshot(now: Date = Date()) -> CodexRateLimitSnapshot? {
+    func currentSnapshot(now: Date = Date(), forceRefresh: Bool = false) -> CodexRateLimitSnapshot? {
         lock.lock()
-        if let cached, let lastFetch, now.timeIntervalSince(lastFetch) < refreshInterval {
+        if !forceRefresh, let cached, let lastFetch, now.timeIntervalSince(lastFetch) < refreshInterval {
             lock.unlock()
             return cached
         }

@@ -253,10 +253,20 @@ private struct MenuContentView: View {
 
             HStack(spacing: 8) {
                 Button {
-                    monitor.refresh()
+                    monitor.refresh(force: true)
                 } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                    if monitor.isRefreshing {
+                        Label {
+                            Text("Refresh")
+                        } icon: {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    } else {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
                 }
+                .disabled(monitor.isRefreshing)
 
                 Button {
                     // This is an LSUIElement (accessory) app — it has no Dock
