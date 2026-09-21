@@ -112,8 +112,13 @@ final class UsageMonitor: ObservableObject {
         // Polled every 30 seconds; five minutes without a fresh reading means
         // the local app-server is failing, not merely idle.
         case .codexAppServer: return 5 * 60
-        // Only written while some Claude Code session renders its status line.
-        case .claudeStatusLine: return 15 * 60
+        // Only written while some Claude Code session renders its status
+        // line — but while nobody is using Claude Code, the figure is not
+        // going anywhere either, and the window's real reset time (which this
+        // source does report) covers the one way it can silently expire. The
+        // case this guards is usage arriving from claude.ai or the desktop
+        // app, which never touches the status line.
+        case .claudeStatusLine: return 30 * 60
         // The desktop app samples roughly every 15 minutes, and only while it
         // is running at all.
         case .claudeDesktop: return 25 * 60
@@ -486,7 +491,10 @@ private final class CodexRateLimitClient: @unchecked Sendable {
     static let shared = CodexRateLimitClient()
     private let lock = NSLock()
     private var cached: DatedCodexSnapshot?
-    private let refreshInterval: TimeInterval = 30
+    /// Comfortably under the caller's 30-second poll, so a scheduled poll
+    /// always produces a real probe instead of occasionally landing just
+    /// inside the cache and doubling the effective staleness.
+    private let refreshInterval: TimeInterval = 20
 
     func currentSnapshot(now: Date = Date(), forceRefresh: Bool = false) -> DatedCodexSnapshot? {
         lock.lock()
