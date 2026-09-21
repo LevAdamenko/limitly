@@ -38,19 +38,26 @@ public struct UsageSnapshot: Equatable, Sendable {
     /// preferred over the budget-derived estimate for agents that have one.
     public let realCurrentPercentages: [AgentID: Double]
     public let realWeeklyPercentages: [AgentID: Double]
+    /// The raw, undated windows each real source reported, kept alongside the
+    /// pre-resolved percentages above so the UI can age them, show their reset
+    /// clock time, and roll them over to 0% the moment they expire — without
+    /// waiting for the next poll to land. See `RateLimitWindow.resolve(at:)`.
+    public let windows: [AgentID: AgentUsageWindows]
 
     public init(
         currentUsage: [AgentID: UsageTotals],
         weeklyUsage: [AgentID: UsageTotals],
         resetTimes: [AgentID: Date] = [:],
         realCurrentPercentages: [AgentID: Double] = [:],
-        realWeeklyPercentages: [AgentID: Double] = [:]
+        realWeeklyPercentages: [AgentID: Double] = [:],
+        windows: [AgentID: AgentUsageWindows] = [:]
     ) {
         self.currentUsage = currentUsage
         self.weeklyUsage = weeklyUsage
         self.resetTimes = resetTimes
         self.realCurrentPercentages = realCurrentPercentages
         self.realWeeklyPercentages = realWeeklyPercentages
+        self.windows = windows
     }
 }
 

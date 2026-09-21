@@ -1,9 +1,9 @@
 import Foundation
 
-enum ClaudeStatusLineInstallerError: LocalizedError {
+public enum ClaudeStatusLineInstallerError: LocalizedError {
     case settingsUnreadable(String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .settingsUnreadable(let reason):
             return "Claude settings unreadable: \(reason)"
@@ -11,36 +11,44 @@ enum ClaudeStatusLineInstallerError: LocalizedError {
     }
 }
 
-enum ClaudeStatusLineInstaller {
-    enum State: Equatable {
+public enum ClaudeStatusLineInstaller {
+    public enum State: Equatable {
         case notInstalled
         case installed
         case installedAlongside(existing: String)
         case claudeSettingsUnreadable(String)
     }
 
-    static var claudeSettingsURL: URL {
+    public static var claudeSettingsURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude", isDirectory: true)
             .appendingPathComponent("settings.json")
     }
 
-    static var limitlyDirectoryURL: URL {
+    public static var limitlyDirectoryURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".limitly", isDirectory: true)
     }
 
-    static var statusLineScriptURL: URL {
+    public static var statusLineScriptURL: URL {
         limitlyDirectoryURL.appendingPathComponent("statusline.sh")
     }
 
-    static var chainFileURL: URL {
+    public static var chainFileURL: URL {
         limitlyDirectoryURL.appendingPathComponent("statusline-chain")
     }
 
-    static let scriptContent: String = """
+    public static let scriptContent: String = """
 #!/bin/sh
-# Limitly statusLine sidecar for Claude Code
+# Limitly statusLine sidecar for Claude Code.
+#
+# Claude Code pipes its status-line JSON to this script on stdin. That payload
+# carries `rate_limits`, which is the only place on this machine that reports
+# Anthropic's own five-hour and seven-day percentages together with their real
+# `resets_at` — everything else available locally is a reconstruction. We
+# record just that fragment for Limitly and hand the untouched input on to
+# whatever status line was configured before, so installing this changes
+# nothing the user sees in their terminal.
 
 INPUT=$(cat)
 LIMITLY_DIR="${LIMITLY_DIR:-$HOME/.limitly}"
@@ -54,30 +62,38 @@ try:
     if raw.strip():
         data = json.loads(raw)
         rate_limits = data.get("rate_limits")
-        if rate_limits and isinstance(rate_limits, dict):
+        if isinstance(rate_limits, dict):
             limits = {}
             for key in ("five_hour", "seven_day"):
-                if key in rate_limits and isinstance(rate_limits[key], dict):
+                if isinstance(rate_limits.get(key), dict):
                     limits[key] = rate_limits[key]
-            if limits:
-                out_dir = sys.argv[1]
-                os.makedirs(out_dir, exist_ok=True)
-                tmp_path = os.path.join(out_dir, f"claude-rate-limits.json.tmp.{os.getpid()}")
-                final_path = os.path.join(out_dir, "claude-rate-limits.json")
-                payload = {
-                    "writtenAt": int(time.time()),
-                    "rate_limits": limits
-                }
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(payload, f)
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_path, final_path)
+            # Written even when a window is missing. Claude Code drops a
+            # window from this payload the moment its resets_at passes, so
+            # "five_hour is gone but seven_day is still here" is exactly how a
+            # session reset announces itself — the most valuable thing this
+            # script can record. Skipping the write there would leave the last
+            # pre-reset reading (often 100%) on disk with nothing to
+            # contradict it.
+            out_dir = sys.argv[1]
+            os.makedirs(out_dir, exist_ok=True)
+            tmp_path = os.path.join(out_dir, "claude-rate-limits.json.tmp.%d" % os.getpid())
+            final_path = os.path.join(out_dir, "claude-rate-limits.json")
+            payload = {"writtenAt": int(time.time()), "rate_limits": limits}
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+                f.flush()
+                os.fsync(f.fileno())
+            # Rename rather than write in place: Limitly polls this file every
+            # few seconds and must never read a half-written one.
+            os.replace(tmp_path, final_path)
 except Exception:
     pass
 ' "$LIMITLY_DIR" 2>/dev/null || true
 fi
 
+# Hand the original input to the status line that was configured before
+# Limitly took the slot, and print its output verbatim. Failures here are
+# swallowed: a broken chained command must not blank out the status line.
 CHAIN_FILE="$LIMITLY_DIR/statusline-chain"
 if [ -f "$CHAIN_FILE" ]; then
     CHAIN_CMD=$(cat "$CHAIN_FILE" 2>/dev/null)
@@ -90,11 +106,11 @@ exit 0
 
 """
 
-    static func state() -> State {
+    public static func state() -> State {
         state(settingsURL: claudeSettingsURL, chainURL: chainFileURL, scriptURL: statusLineScriptURL)
     }
 
-    static func state(
+    public static func state(
         settingsURL: URL = claudeSettingsURL,
         chainURL: URL = chainFileURL,
         scriptURL: URL = statusLineScriptURL
@@ -140,11 +156,11 @@ exit 0
         return .notInstalled
     }
 
-    static func install() throws {
+    public static func install() throws {
         try install(settingsURL: claudeSettingsURL, limitlyDir: limitlyDirectoryURL)
     }
 
-    static func install(
+    public static func install(
         settingsURL: URL = claudeSettingsURL,
         limitlyDir: URL = limitlyDirectoryURL
     ) throws {
@@ -215,11 +231,11 @@ exit 0
         try writeSettingsAtomically(settingsDict, to: settingsURL)
     }
 
-    static func uninstall() throws {
+    public static func uninstall() throws {
         try uninstall(settingsURL: claudeSettingsURL, limitlyDir: limitlyDirectoryURL)
     }
 
-    static func uninstall(
+    public static func uninstall(
         settingsURL: URL = claudeSettingsURL,
         limitlyDir: URL = limitlyDirectoryURL
     ) throws {
@@ -276,7 +292,7 @@ exit 0
         }
     }
 
-    static func isOurScriptCommand(_ command: String, scriptPath: String) -> Bool {
+    public static func isOurScriptCommand(_ command: String, scriptPath: String) -> Bool {
         let unquoted = command.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
         if unquoted == scriptPath || unquoted == "~/.limitly/statusline.sh" {
             return true

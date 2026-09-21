@@ -201,6 +201,13 @@ private struct MenuContentView: View {
                         if let reset = monitor.resetText(for: agent) {
                             Text(reset)
                         }
+                        // Only appears once a source has gone quiet for longer
+                        // than its own refresh cadence, so a number that is
+                        // quietly hours old never passes for a live one.
+                        if let freshness = monitor.freshnessText(for: agent) {
+                            Label(freshness, systemImage: "clock.arrow.circlepath")
+                                .foregroundStyle(.orange)
+                        }
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -220,14 +227,21 @@ private struct MenuContentView: View {
 
                 VStack(spacing: 0) {
                     ForEach(Array(AgentID.allCases.enumerated()), id: \.element) { index, agent in
-                        HStack(spacing: 8) {
-                            AgentGlyph(agent: agent, colorMode: monitor.settings.iconColor, size: 16)
-                            Text(agent.displayName)
-                                .fontWeight(.medium)
-                            Spacer()
-                            Text(monitor.weeklyText(for: agent))
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 8) {
+                                AgentGlyph(agent: agent, colorMode: monitor.settings.iconColor, size: 16)
+                                Text(agent.displayName)
+                                    .fontWeight(.medium)
+                                Spacer()
+                                Text(monitor.weeklyText(for: agent))
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            }
+                            if let reset = monitor.weeklyResetText(for: agent) {
+                                Text(reset)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.leading, 24)
+                            }
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)

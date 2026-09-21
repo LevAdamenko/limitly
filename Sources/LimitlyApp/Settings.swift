@@ -8,6 +8,20 @@ enum PercentageDisplayMode: String, Codable, CaseIterable {
     var displayName: String { self == .used ? "Used" : "Remaining" }
 }
 
+/// How a window's reset is written out. "Resets in 4h 8m" is useless for
+/// planning a day around the limit — the clock time is what the user compares
+/// against a meeting or a bedtime — so the default shows both.
+enum ResetDisplayMode: String, Codable, CaseIterable {
+    case both, absolute, relative
+    var displayName: String {
+        switch self {
+        case .both: "Clock time and countdown"
+        case .absolute: "Clock time"
+        case .relative: "Countdown"
+        }
+    }
+}
+
 enum IconColorMode: String, Codable, CaseIterable {
     case automatic, black, white
     var displayName: String {
@@ -59,6 +73,7 @@ final class SettingsStore: ObservableObject {
     @Published var idleNotificationsEnabled: Bool = true
     @Published var percentageDisplay: PercentageDisplayMode = .used
     @Published var iconColor: IconColorMode = .automatic
+    @Published var resetDisplay: ResetDisplayMode = .both
     private let key = "Limitly.Settings.v1"
 
     init() { load() }
@@ -67,14 +82,16 @@ final class SettingsStore: ObservableObject {
     func weeklyBudget(for agent: AgentID) -> UsageBudget { let c = config(for: agent); return UsageBudget(unit: c.budgetUnit, amount: c.weeklyBudgetAmount) }
     func thresholds(for agent: AgentID) -> [Double] { config(for: agent).thresholds.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) } }
     func displayed(_ percentage: Double) -> Double { percentageDisplay == .used ? percentage : max(0, 100 - percentage) }
-    func save() { let value = Persisted(claude: claude, codex: codex, delivery: delivery, idleSeconds: idleSeconds, idleNotificationsEnabled: idleNotificationsEnabled, percentageDisplay: percentageDisplay, iconColor: iconColor); if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) } }
-    private func load() { guard let data = UserDefaults.standard.data(forKey: key), let value = try? JSONDecoder().decode(Persisted.self, from: data) else { return }; claude = value.claude; codex = value.codex; delivery = value.delivery; idleSeconds = value.idleSeconds; idleNotificationsEnabled = value.idleNotificationsEnabled ?? true; percentageDisplay = value.percentageDisplay ?? .used; iconColor = value.iconColor ?? .automatic }
-    private struct Persisted: Codable { var claude: AgentSettings; var codex: AgentSettings; var delivery: AlertDelivery; var idleSeconds: Double; var idleNotificationsEnabled: Bool?; var percentageDisplay: PercentageDisplayMode?; var iconColor: IconColorMode? }
+    func save() { let value = Persisted(claude: claude, codex: codex, delivery: delivery, idleSeconds: idleSeconds, idleNotificationsEnabled: idleNotificationsEnabled, percentageDisplay: percentageDisplay, iconColor: iconColor, resetDisplay: resetDisplay); if let data = try? JSONEncoder().encode(value) { UserDefaults.standard.set(data, forKey: key) } }
+    private func load() { guard let data = UserDefaults.standard.data(forKey: key), let value = try? JSONDecoder().decode(Persisted.self, from: data) else { return }; claude = value.claude; codex = value.codex; delivery = value.delivery; idleSeconds = value.idleSeconds; idleNotificationsEnabled = value.idleNotificationsEnabled ?? true; percentageDisplay = value.percentageDisplay ?? .used; iconColor = value.iconColor ?? .automatic; resetDisplay = value.resetDisplay ?? .both }
+    private struct Persisted: Codable { var claude: AgentSettings; var codex: AgentSettings; var delivery: AlertDelivery; var idleSeconds: Double; var idleNotificationsEnabled: Bool?; var percentageDisplay: PercentageDisplayMode?; var iconColor: IconColorMode?; var resetDisplay: ResetDisplayMode? }
 }
 
 struct SettingsView: View {
     @ObservedObject var settings: SettingsStore
     let sendTestAlert: () -> Void
+    @State private var statusLineState: ClaudeStatusLineInstaller.State = .notInstalled
+    @State private var statusLineError: String?
 
     var body: some View {
         ScrollView {
@@ -88,6 +105,18 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         .onChange(of: settings.percentageDisplay) { _, _ in settings.save() }
+                    }
+
+                    rowDivider
+
+                    settingRow("Show reset time as") {
+                        Picker("Show reset time as", selection: $settings.resetDisplay) {
+                            ForEach(ResetDisplayMode.allCases, id: \.self) {
+                                Text($0.displayName).tag($0)
+                            }
+                        }
+                        .labelsHidden()
+                        .onChange(of: settings.resetDisplay) { _, _ in settings.save() }
                     }
 
                     rowDivider
@@ -139,13 +168,41 @@ struct SettingsView: View {
                     }
                 }
 
+                settingsCard(title: "Claude data source", symbol: "antenna.radiowaves.left.and.right") {
+                    settingRow("Claude Code status line") {
+                        HStack(spacing: 8) {
+                            Text(statusLineStatusText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button(statusLineIsInstalled ? "Disconnect" : "Connect") {
+                                toggleStatusLine()
+                            }
+                        }
+                    }
+
+                    if let statusLineError {
+                        Label(statusLineError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Text("Connecting adds a small script to Claude Code\u{2019}s status line. It is the only place on this Mac that reports Anthropic\u{2019}s own five-hour and seven-day percentages together with their real reset times, so Limitly can show exactly when the limit comes back instead of estimating. Any status line you already use keeps working \u{2014} it is chained, not replaced, and your settings.json is backed up first.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 agentSection("Claude", symbol: "sparkles", binding: $settings.claude)
                 agentSection("Codex", symbol: "terminal", binding: $settings.codex)
 
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "info.circle")
                         .foregroundStyle(.secondary)
-                    Text("Both Claude’s and Codex’s percentages are the providers’ own real usage figures — Claude’s read from the Claude desktop app’s local cache, Codex’s read live from the \u{2018}codex\u{2019} CLI’s account status — not an estimate. The budget fields below are only used as a fallback if that real figure is ever unavailable. Weekly alerts use the trailing seven days; “Remaining” inverts both the current and weekly percentage.")
+                    Text("Both percentages are the providers\u{2019} own real usage figures, not an estimate \u{2014} Codex\u{2019}s read live from the \u{2018}codex\u{2019} CLI\u{2019}s account status, Claude\u{2019}s from its status line when connected above, otherwise from the Claude desktop app\u{2019}s local cache. The budget fields below are only a fallback for when no real figure is available. Weekly alerts use the trailing seven days; \u{201C}Remaining\u{201D} inverts both the current and weekly percentage.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -165,6 +222,37 @@ struct SettingsView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .frame(width: 500, height: 700)
         .navigationTitle("Limitly Settings")
+        .onAppear { statusLineState = ClaudeStatusLineInstaller.state() }
+    }
+
+    private var statusLineIsInstalled: Bool {
+        switch statusLineState {
+        case .installed, .installedAlongside: return true
+        case .notInstalled, .claudeSettingsUnreadable: return false
+        }
+    }
+
+    private var statusLineStatusText: String {
+        switch statusLineState {
+        case .installed: return "Connected"
+        case .installedAlongside(let existing): return "Connected, chained to \(existing)"
+        case .notInstalled: return "Not connected"
+        case .claudeSettingsUnreadable(let reason): return reason
+        }
+    }
+
+    private func toggleStatusLine() {
+        statusLineError = nil
+        do {
+            if statusLineIsInstalled {
+                try ClaudeStatusLineInstaller.uninstall()
+            } else {
+                try ClaudeStatusLineInstaller.install()
+            }
+        } catch {
+            statusLineError = error.localizedDescription
+        }
+        statusLineState = ClaudeStatusLineInstaller.state()
     }
 
     @ViewBuilder

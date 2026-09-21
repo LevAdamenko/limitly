@@ -40,12 +40,20 @@ public struct PlanUsageHistoryParser: Sendable {
 public struct PlanUsageSnapshot: Equatable, Sendable {
     public let fiveHourPercent: Double
     public let sevenDayPercent: Double
+    /// Estimated, not reported — see `PlanUsageAnalyzer.current`. Only worth
+    /// trusting while `latestSampleTime` is recent.
     public let sessionResetTime: Date
+    /// Timestamp of the newest sample this was derived from. The desktop app
+    /// only writes samples while it is running, so this can be hours or days
+    /// behind `Date()` — everything here has to be dated against it rather
+    /// than treated as current.
+    public let latestSampleTime: Date
 
-    public init(fiveHourPercent: Double, sevenDayPercent: Double, sessionResetTime: Date) {
+    public init(fiveHourPercent: Double, sevenDayPercent: Double, sessionResetTime: Date, latestSampleTime: Date = .distantPast) {
         self.fiveHourPercent = fiveHourPercent
         self.sevenDayPercent = sevenDayPercent
         self.sessionResetTime = sessionResetTime
+        self.latestSampleTime = latestSampleTime
     }
 }
 
@@ -79,7 +87,8 @@ public enum PlanUsageAnalyzer {
         return PlanUsageSnapshot(
             fiveHourPercent: extrapolatedFiveHourPercent(blockSamples: blockSamples, now: now, maxExtrapolation: maxExtrapolation),
             sevenDayPercent: latest.sevenDayPercent,
-            sessionResetTime: blockStart.addingTimeInterval(sessionLength)
+            sessionResetTime: blockStart.addingTimeInterval(sessionLength),
+            latestSampleTime: latest.timestamp
         )
     }
 

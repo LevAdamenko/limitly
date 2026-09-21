@@ -7,31 +7,57 @@ import LimitlyCore
 final class UsageMonitor: ObservableObject {
     @Published private(set) var snapshot = UsageSnapshot(currentUsage: [:], weeklyUsage: [:])
     @Published private(set) var lastError: String?
+    /// The moment `snapshot`'s windows were last interpreted. Republished on
+    /// a short tick so countdowns advance and a window that has just passed
+    /// its reset time drops to 0% on its own, without waiting for the next
+    /// poll to land.
+    @Published private(set) var resolvedAt = Date()
+    @Published private(set) var isRefreshing = false
     let settings = SettingsStore()
+
     private var thresholdDetector = ThresholdDetector()
     private var weeklyDetector = WeeklyThresholdDetector()
     private var activityTracker = ActivityTracker()
     private var sessionActivityTracker = SessionActivityTracker()
-    private var timer: Timer?
     private let banner = BannerController()
-    /// `refresh()` shells out to `npx ccusage` (and, for Codex, spawns
-    /// `codex app-server`); guarding against overlap keeps a single slow
-    /// call from letting the 5-second timer pile up concurrent subprocesses
-    /// that all contend for npm's shared package-install lock.
-    @Published private(set) var isRefreshing = false
+
+    private var ccusageTimer: Timer?
+    private var codexTimer: Timer?
+    private var tickTimer: Timer?
+
+    /// `refreshCCUsage` shells out to `npx ccusage` twice, each with a 20s
+    /// timeout; guarding against overlap keeps a slow call from letting the
+    /// timer pile up concurrent subprocesses that all contend for npm's
+    /// shared package-install lock.
+    private var isFetchingCCUsage = false
+    /// Deliberately a *separate* guard from the one above. These two sources
+    /// used to share one serialized path, so a single slow `npx` run starved
+    /// the Codex probe for tens of seconds at a time — the main reason Codex's
+    /// number went stale far more often than Claude's.
+    private var isProbingCodex = false
+
+    private var ccusagePortion = CCUsagePortion()
+    private var codexWindows: AgentUsageWindows?
 
     init() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        ccusageTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshCCUsage() }
+        }
+        codexTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshCodex() }
+        }
+        tickTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.rebuild() }
         }
     }
-    deinit { timer?.invalidate() }
+    deinit { ccusageTimer?.invalidate(); codexTimer?.invalidate(); tickTimer?.invalidate() }
+
+    // MARK: - Display
 
     var menuBarTitle: String { "Claude \(percentageText(for: .claude)) · Codex \(percentageText(for: .codex))" }
-    /// Prefers Anthropic's own real percentage (from the Claude desktop
-    /// app's local cache) over the budget-derived estimate when available —
-    /// see `realPercentage(for:)`.
+    /// Prefers the provider's own real percentage over the budget-derived
+    /// estimate when one is available — see `realPercentage(for:)`.
     func percentageText(for agent: AgentID) -> String { guard let value = realPercentage(for: agent) else { return "—" }; return "\(Int(settings.displayed(value).rounded()))%" }
     /// The actual fraction of budget used, ignoring the "Show percentage
     /// as" display toggle — for UI that visualizes severity (progress bars,
@@ -45,7 +71,78 @@ final class UsageMonitor: ObservableObject {
         return settings.budget(for: agent).percentage(for: usage)
     }
     func usageText(for agent: AgentID) -> String { guard let usage = snapshot.currentUsage[agent] else { return agent == .claude ? "No usage in current session" : "No usage today" }; let label = agent == .claude ? "Current session" : "Today"; return "\(label): \(format(usage, unit: settings.budget(for: agent).unit))" }
-    func resetText(for agent: AgentID) -> String? { guard let reset = snapshot.resetTimes[agent] else { return nil }; let interval = max(0, reset.timeIntervalSinceNow); let text = Self.durationFormatter.string(from: interval) ?? "soon"; return "Session resets in \(text)" }
+
+    func resetText(for agent: AgentID) -> String? {
+        guard let resolved = resolvedSession(for: agent) else { return nil }
+        return resetPhrase(resolved, label: "Session")
+    }
+
+    func weeklyResetText(for agent: AgentID) -> String? {
+        guard let resolved = resolvedWeekly(for: agent) else { return nil }
+        return resetPhrase(resolved, label: "Weekly")
+    }
+
+    /// Dates the number when its source has gone quiet, so a figure that is
+    /// quietly hours old never passes for a live one.
+    func freshnessText(for agent: AgentID) -> String? {
+        guard let resolved = resolvedSession(for: agent), resolved.isStale else { return nil }
+        let age = Self.durationFormatter.string(from: resolved.age) ?? "a while"
+        return "Last reading \(age) ago"
+    }
+
+    func resolvedSession(for agent: AgentID) -> ResolvedRateLimit? {
+        guard let window = snapshot.windows[agent]?.session else { return nil }
+        return window.resolve(at: resolvedAt, staleAfter: Self.staleAfter(window.source), discardAfter: Self.sessionDiscardAfter)
+    }
+
+    func resolvedWeekly(for agent: AgentID) -> ResolvedRateLimit? {
+        guard let window = snapshot.windows[agent]?.weekly else { return nil }
+        return window.resolve(at: resolvedAt, staleAfter: Self.staleAfter(window.source), discardAfter: Self.weeklyDiscardAfter)
+    }
+
+    /// One full session window: past that, a reading that nothing has
+    /// refreshed says nothing about now.
+    private static let sessionDiscardAfter: TimeInterval = 5 * 3600
+    /// A weekly window moves slowly, so an older reading is still a useful
+    /// floor — but not one from days ago.
+    private static let weeklyDiscardAfter: TimeInterval = 24 * 3600
+
+    private static func staleAfter(_ source: UsageSource) -> TimeInterval {
+        switch source {
+        // Polled every 30 seconds; five minutes without a fresh reading means
+        // the local app-server is failing, not merely idle.
+        case .codexAppServer: return 5 * 60
+        // Only written while some Claude Code session renders its status line.
+        case .claudeStatusLine: return 15 * 60
+        // The desktop app samples roughly every 15 minutes, and only while it
+        // is running at all.
+        case .claudeDesktop: return 25 * 60
+        case .ccusageBlocks, .budgetEstimate: return 5 * 60
+        }
+    }
+
+    private func resetPhrase(_ resolved: ResolvedRateLimit, label: String) -> String? {
+        guard let reset = resolved.resetsAt else { return nil }
+        let now = Date()
+        let tilde = resolved.resetIsApproximate ? "~" : ""
+        let clock = Self.clockText(for: reset, now: now)
+        let relative = Self.durationFormatter.string(from: max(0, reset.timeIntervalSince(now))) ?? "under a minute"
+        switch settings.resetDisplay {
+        case .absolute: return "\(label) resets at \(tilde)\(clock)"
+        case .relative: return "\(label) resets in \(tilde)\(relative)"
+        case .both: return "\(label) resets at \(tilde)\(clock) · in \(relative)"
+        }
+    }
+
+    /// Same-day resets read as a bare clock time; a weekly window landing
+    /// days out needs the day name to mean anything.
+    private static func clockText(for date: Date, now: Date) -> String {
+        Calendar.current.isDate(date, inSameDayAs: now)
+            ? timeFormatter.string(from: date)
+            : dayAndTimeFormatter.string(from: date)
+    }
+    private static let timeFormatter: DateFormatter = { let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none; return f }()
+    private static let dayAndTimeFormatter: DateFormatter = { let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("EEE jm"); return f }()
     private static let durationFormatter: DateComponentsFormatter = { let f = DateComponentsFormatter(); f.allowedUnits = [.hour, .minute]; f.unitsStyle = .abbreviated; f.zeroFormattingBehavior = .dropAll; return f }()
 
     /// Fires a real alert through the same delivery path as a genuine
@@ -54,33 +151,127 @@ final class UsageMonitor: ObservableObject {
     /// waiting for real usage to cross a threshold.
     func sendTestAlert() { deliver(title: "Limitly test alert", body: "This is what a usage alert looks like.") }
 
-    /// `force` bypasses `CodexRateLimitClient`'s 90-second cache — the
-    /// automatic 5-second timer never sets it (that cache is what keeps
-    /// polling cheap), but the manual Refresh button does, since silently
-    /// returning the same cached Codex numbers made the button look like it
-    /// wasn't doing anything.
+    // MARK: - Refresh
+
     func refresh(force: Bool = false) {
-        guard !isRefreshing else { return }
-        isRefreshing = true
+        refreshCCUsage()
+        refreshCodex(force: force)
+    }
+
+    private func refreshCCUsage() {
+        guard !isFetchingCCUsage else { return }
+        isFetchingCCUsage = true
+        updateBusyFlag()
         let idleNotificationsEnabled = settings.idleNotificationsEnabled
         Task.detached { [weak self] in
-            do {
-                let result = try CCUsageClient.fetch(forceCodexRefresh: force)
-                // Skip the AppleScript round-trip entirely when idle
-                // notifications are off — no point paying for it on every
-                // 5-second refresh if nothing will use it.
-                let terminals = idleNotificationsEnabled ? GhosttyController.openTerminals() : []
-                await self?.apply(result, terminals: terminals)
-            } catch { await self?.record(error) }
+            let result = Result { try CCUsageClient.fetch() }
+            // Skip the AppleScript round-trip entirely when idle
+            // notifications are off — no point paying for it on every
+            // 5-second refresh if nothing will use it.
+            let terminals = idleNotificationsEnabled ? GhosttyController.openTerminals() : []
+            await self?.applyCCUsage(result, terminals: terminals)
         }
     }
 
-    private func apply(_ result: UsageSnapshot, terminals: [GhosttyTerminal]) {
-        isRefreshing = false
-        snapshot = result; lastError = nil
-        let now = Date()
-        let dailyPercentages = percentages(result)
-        let weeklyPercentages = weeklyPercentages(result)
+    /// `force` bypasses the probe's short cache — the automatic timer never
+    /// sets it (that cache is what keeps polling cheap), but the manual
+    /// Refresh button does, since silently returning the same cached Codex
+    /// numbers made the button look like it wasn't doing anything.
+    private func refreshCodex(force: Bool = false) {
+        guard !isProbingCodex else { return }
+        isProbingCodex = true
+        updateBusyFlag()
+        Task.detached { [weak self] in
+            let dated = CodexRateLimitClient.shared.currentSnapshot(forceRefresh: force)
+            await self?.applyCodex(dated)
+        }
+    }
+
+    private func applyCCUsage(_ result: Result<CCUsagePortion, Error>, terminals: [GhosttyTerminal]) {
+        isFetchingCCUsage = false
+        updateBusyFlag()
+        switch result {
+        case .success(let portion):
+            ccusagePortion = portion
+            lastError = nil
+        case .failure(let error):
+            // Don't blank out what the independent real-percentage sources
+            // already gave us — a ccusage failure only costs the
+            // budget-estimate fallback and the token/dollar totals.
+            lastError = "ccusage refresh failed: \(error.localizedDescription)"
+        }
+        rebuild()
+        evaluateIdle(terminals: terminals)
+    }
+
+    private func applyCodex(_ dated: DatedCodexSnapshot?) {
+        isProbingCodex = false
+        updateBusyFlag()
+        if let dated {
+            codexWindows = AgentUsageWindows(
+                session: RateLimitWindow(
+                    usedPercent: dated.snapshot.fiveHourPercent,
+                    resetsAt: dated.snapshot.sessionResetTime,
+                    observedAt: dated.observedAt,
+                    source: .codexAppServer
+                ),
+                weekly: dated.snapshot.weeklyPercent.map {
+                    RateLimitWindow(
+                        usedPercent: $0,
+                        resetsAt: dated.snapshot.weeklyResetTime,
+                        observedAt: dated.observedAt,
+                        source: .codexAppServer
+                    )
+                }
+            )
+        }
+        rebuild()
+    }
+
+    private func updateBusyFlag() { isRefreshing = isFetchingCCUsage || isProbingCodex }
+
+    // MARK: - Resolution
+
+    /// Re-interprets everything currently known against the clock and
+    /// republishes. Cheap and side-effect-free apart from threshold alerts,
+    /// which is why the display tick can call it every few seconds.
+    private func rebuild(now: Date = Date()) {
+        var windows: [AgentID: AgentUsageWindows] = [:]
+        if let claude = ccusagePortion.claude { windows[.claude] = claude }
+        if let codex = codexWindows { windows[.codex] = codex }
+
+        var realCurrent: [AgentID: Double] = [:]
+        var realWeekly: [AgentID: Double] = [:]
+        var resets: [AgentID: Date] = [:]
+        for agent in AgentID.allCases {
+            if let session = windows[agent]?.session,
+               let resolved = session.resolve(at: now, staleAfter: Self.staleAfter(session.source), discardAfter: Self.sessionDiscardAfter) {
+                realCurrent[agent] = resolved.usedPercent
+                if let reset = resolved.resetsAt { resets[agent] = reset }
+            }
+            if let weekly = windows[agent]?.weekly,
+               let resolved = weekly.resolve(at: now, staleAfter: Self.staleAfter(weekly.source), discardAfter: Self.weeklyDiscardAfter) {
+                realWeekly[agent] = resolved.usedPercent
+            }
+        }
+
+        snapshot = UsageSnapshot(
+            currentUsage: ccusagePortion.currentUsage,
+            weeklyUsage: ccusagePortion.weeklyUsage,
+            resetTimes: resets,
+            realCurrentPercentages: realCurrent,
+            realWeeklyPercentages: realWeekly,
+            windows: windows
+        )
+        resolvedAt = now
+        evaluateThresholds()
+    }
+
+    // MARK: - Alerts
+
+    private func evaluateThresholds() {
+        let dailyPercentages = percentages(snapshot)
+        let weeklyPercentages = weeklyPercentages(snapshot)
         let thresholdEvents = thresholdDetector.observe(percentages: dailyPercentages, thresholds: Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, settings.thresholds(for: $0)) }))
         let weeklyEvents = weeklyDetector.observe(percentages: weeklyPercentages, thresholds: Dictionary(uniqueKeysWithValues: AgentID.allCases.map { ($0, settings.config(for: $0).weeklyThreshold) }))
         // The detectors still observe every tick regardless of this toggle
@@ -92,30 +283,33 @@ final class UsageMonitor: ObservableObject {
         for event in weeklyEvents where settings.config(for: event.agent).thresholdNotificationsEnabled {
             deliver(title: "\(event.agent.displayName) weekly usage alert", body: "Trailing 7-day usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).")
         }
-        if settings.idleNotificationsEnabled {
-            let candidates = terminals.flatMap { terminal in
-                AgentID.allCases.map {
-                    SessionCandidate(agent: $0, workingDirectory: terminal.workingDirectory, tabTitle: terminal.title)
-                }
-            }
-            let sessionObservation = sessionActivityTracker.observe(
-                candidates: candidates,
-                at: now,
-                idleInterval: settings.idleSeconds
-            )
-            let fallbackUsages = result.currentUsage.filter { !sessionObservation.matchedAgents.contains($0.key) }
-            let idleEvents = activityTracker.observe(usages: fallbackUsages, at: now, idleInterval: settings.idleSeconds)
-            for event in sessionObservation.idleEvents {
-                deliver(
-                    title: "\(event.agent.displayName) is idle",
-                    body: "No new activity in \"\(event.tabTitle)\" for \(Int(settings.idleSeconds))s.",
-                    workingDirectory: event.workingDirectory
-                )
-            }
-            for event in idleEvents { deliver(title: "\(event.agent.displayName) is idle", body: "No new usage has appeared for \(Int(settings.idleSeconds)) seconds.") }
-        }
     }
-    private func record(_ error: Error) { isRefreshing = false; lastError = "ccusage refresh failed: \(error.localizedDescription)" }
+
+    private func evaluateIdle(terminals: [GhosttyTerminal]) {
+        guard settings.idleNotificationsEnabled else { return }
+        let now = Date()
+        let candidates = terminals.flatMap { terminal in
+            AgentID.allCases.map {
+                SessionCandidate(agent: $0, workingDirectory: terminal.workingDirectory, tabTitle: terminal.title)
+            }
+        }
+        let sessionObservation = sessionActivityTracker.observe(
+            candidates: candidates,
+            at: now,
+            idleInterval: settings.idleSeconds
+        )
+        let fallbackUsages = snapshot.currentUsage.filter { !sessionObservation.matchedAgents.contains($0.key) }
+        let idleEvents = activityTracker.observe(usages: fallbackUsages, at: now, idleInterval: settings.idleSeconds)
+        for event in sessionObservation.idleEvents {
+            deliver(
+                title: "\(event.agent.displayName) is idle",
+                body: "No new activity in \"\(event.tabTitle)\" for \(Int(settings.idleSeconds))s.",
+                workingDirectory: event.workingDirectory
+            )
+        }
+        for event in idleEvents { deliver(title: "\(event.agent.displayName) is idle", body: "No new usage has appeared for \(Int(settings.idleSeconds)) seconds.") }
+    }
+
     private func percentages(_ snapshot: UsageSnapshot) -> [AgentID: Double] {
         Dictionary(uniqueKeysWithValues: AgentID.allCases.compactMap { agent -> (AgentID, Double)? in
             if let real = snapshot.realCurrentPercentages[agent] { return (agent, real) }
@@ -154,6 +348,21 @@ final class UsageMonitor: ObservableObject {
     }
 }
 
+/// Everything one `ccusage` pass produces: the locally-measured token/dollar
+/// totals that back the budget estimate, plus whatever Claude windows the
+/// local sources could supply.
+private struct CCUsagePortion: Sendable {
+    var currentUsage: [AgentID: UsageTotals] = [:]
+    var weeklyUsage: [AgentID: UsageTotals] = [:]
+    var claude: AgentUsageWindows?
+}
+
+private struct DatedCodexSnapshot: Sendable {
+    let snapshot: CodexRateLimitSnapshot
+    /// When the probe that produced this actually ran.
+    let observedAt: Date
+}
+
 private enum CCUsageClient {
     /// Pinned to an exact version rather than `@latest`. `@latest` is a
     /// dist-tag, which npm/npx refuses to trust from any local cache and
@@ -165,17 +374,12 @@ private enum CCUsageClient {
     /// so `@latest` was making this fail on every single 5-second refresh.
     private static let ccusagePackage = "ccusage@20.0.20"
 
-    static func fetch(now: Date = Date(), forceCodexRefresh: Bool = false) throws -> UsageSnapshot {
+    static func fetch(now: Date = Date()) throws -> CCUsagePortion {
         let calendar = Calendar.current
         let since = calendar.date(byAdding: .day, value: -6, to: now) ?? now
         let formatter = DateFormatter(); formatter.calendar = calendar; formatter.dateFormat = "yyyy-MM-dd"
         let parser = CCUsageParser()
 
-        // ccusage only backs the budget-estimate fallback (see the
-        // Settings footnote) — the "real" percentage clients below are
-        // independent of it. A ccusage failure shouldn't blank out
-        // percentages that already came from those real sources, so it's
-        // captured rather than thrown immediately.
         var ccusageError: Error?
         var rows: [AgentID: [DatedUsage]] = [:]
         do {
@@ -200,50 +404,31 @@ private enum CCUsageClient {
             // subprocess call itself failing (network hiccup, non-zero
             // exit, bad JSON) — in that failure case, overwriting with a
             // hard zero would visibly contradict a real non-zero percent
-            // shown from the independent Claude desktop cache.
+            // shown from the independent real sources.
             currentUsage[.claude] = UsageTotals(totalTokens: 0, totalCost: 0)
         }
-        var resetTimes: [AgentID: Date] = [:]
-        if let reset = activeBlock?.endTime { resetTimes[.claude] = reset }
 
-        var realCurrentPercentages: [AgentID: Double] = [:]
-        var realWeeklyPercentages: [AgentID: Double] = [:]
-        if let real = ClaudeDesktopUsageClient.currentSnapshot() {
-            realCurrentPercentages[.claude] = real.fiveHourPercent
-            realWeeklyPercentages[.claude] = real.sevenDayPercent
-            // `resetTimes[.claude]` may already hold `activeBlock?.endTime`
-            // above — real message timestamps from ccusage's blocks, quantized
-            // the same way Anthropic's own 5-hour window is. That's strictly
-            // more precise than this heuristic guess (scanning ~15-minute
-            // desktop-app percentage samples for where the value drops), so
-            // it must win when both are available; only fall back to the
-            // heuristic when ccusage found no active block (e.g. the account
-            // has no local Claude Code CLI logs for `blocks` to read).
-            if resetTimes[.claude] == nil {
-                resetTimes[.claude] = real.sessionResetTime
-            }
-        }
-        if let real = CodexRateLimitClient.shared.currentSnapshot(forceRefresh: forceCodexRefresh) {
-            realCurrentPercentages[.codex] = real.fiveHourPercent
-            if let weeklyPercent = real.weeklyPercent { realWeeklyPercentages[.codex] = weeklyPercent }
-            if let reset = real.sessionResetTime { resetTimes[.codex] = reset }
-        }
+        let claudeWindows = ClaudeWindowResolver.windows(
+            statusLine: ClaudeStatusLineUsageFile.currentSnapshot(),
+            desktop: ClaudeDesktopUsageClient.currentSnapshot(),
+            ccusageBlockEnd: activeBlock?.endTime,
+            now: now
+        )
 
-        // Only surface the ccusage failure if neither agent has a real
-        // percentage to show anyway — otherwise this would still be a
-        // useful, working refresh.
-        if let ccusageError, realCurrentPercentages[.claude] == nil, realCurrentPercentages[.codex] == nil {
+        // Only surface the ccusage failure if there is no real percentage to
+        // fall back on anyway — otherwise this would still be a useful,
+        // working refresh.
+        if let ccusageError, claudeWindows == nil {
             throw ccusageError
         }
 
-        return UsageSnapshot(
+        return CCUsagePortion(
             currentUsage: currentUsage,
             weeklyUsage: parser.aggregate(rows),
-            resetTimes: resetTimes,
-            realCurrentPercentages: realCurrentPercentages,
-            realWeeklyPercentages: realWeeklyPercentages
+            claude: claudeWindows
         )
     }
+
     /// `npx` can stall for minutes if it contends with another concurrent
     /// invocation over npm's shared package-install lock (the caller
     /// already guards against overlapping refreshes, but this is a second,
@@ -300,13 +485,12 @@ private enum ClaudeDesktopUsageClient {
 private final class CodexRateLimitClient: @unchecked Sendable {
     static let shared = CodexRateLimitClient()
     private let lock = NSLock()
-    private var cached: CodexRateLimitSnapshot?
-    private var lastFetch: Date?
-    private let refreshInterval: TimeInterval = 90
+    private var cached: DatedCodexSnapshot?
+    private let refreshInterval: TimeInterval = 30
 
-    func currentSnapshot(now: Date = Date(), forceRefresh: Bool = false) -> CodexRateLimitSnapshot? {
+    func currentSnapshot(now: Date = Date(), forceRefresh: Bool = false) -> DatedCodexSnapshot? {
         lock.lock()
-        if !forceRefresh, let cached, let lastFetch, now.timeIntervalSince(lastFetch) < refreshInterval {
+        if !forceRefresh, let cached, now.timeIntervalSince(cached.observedAt) < refreshInterval {
             lock.unlock()
             return cached
         }
@@ -315,8 +499,14 @@ private final class CodexRateLimitClient: @unchecked Sendable {
         let fetched = Self.probe()
         lock.lock()
         defer { lock.unlock() }
-        if let fetched { cached = fetched; lastFetch = now }
-        return fetched ?? cached
+        if let fetched {
+            cached = DatedCodexSnapshot(snapshot: fetched, observedAt: now)
+        }
+        // On failure the previous reading is returned *with its original
+        // timestamp*, never re-dated to now. That is the whole point: the
+        // caller ages it, flags it as stale, and eventually drops it, instead
+        // of a failed probe silently pinning a long-dead percentage on screen.
+        return cached
     }
 
     /// Newer `codex` builds drop the `account/rateLimits/read` request
