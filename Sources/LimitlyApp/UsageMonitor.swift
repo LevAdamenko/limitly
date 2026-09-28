@@ -356,6 +356,25 @@ final class UsageMonitor: ObservableObject {
 /// Everything one `ccusage` pass produces: the locally-measured token/dollar
 /// totals that back the budget estimate, plus whatever Claude windows the
 /// local sources could supply.
+/// An app launched from Finder or at login inherits launchd's bare
+/// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, not the shell's, so `/usr/bin/env`
+/// can't find `codex` or `npx` (nor the `node` their shebangs need) in
+/// `/usr/local/bin` or Homebrew. Only launching from a terminal hid this.
+/// Appending the usual install locations fixes it without overriding a PATH
+/// that already has them.
+private enum ToolEnvironment {
+    static let current: [String: String] = {
+        var environment = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        var entries = (environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin").split(separator: ":").map(String.init)
+        for extra in ["/opt/homebrew/bin", "/usr/local/bin", "\(home)/.local/bin", "\(home)/.volta/bin", "\(home)/.bun/bin"] where !entries.contains(extra) {
+            entries.append(extra)
+        }
+        environment["PATH"] = entries.joined(separator: ":")
+        return environment
+    }()
+}
+
 private struct CCUsagePortion: Sendable {
     var currentUsage: [AgentID: UsageTotals] = [:]
     var weeklyUsage: [AgentID: UsageTotals] = [:]
@@ -443,7 +462,7 @@ private enum CCUsageClient {
     /// exiting.
     private static func run(_ arguments: [String], timeout: TimeInterval = 20) throws -> Data {
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/env"); process.arguments = ["npx"] + arguments
-        var environment = ProcessInfo.processInfo.environment; environment["npm_config_cache"] = FileManager.default.temporaryDirectory.appendingPathComponent("limitly-npm-cache", isDirectory: true).path; environment["NO_COLOR"] = "1"; process.environment = environment
+        var environment = ToolEnvironment.current; environment["npm_config_cache"] = FileManager.default.temporaryDirectory.appendingPathComponent("limitly-npm-cache", isDirectory: true).path; environment["NO_COLOR"] = "1"; process.environment = environment
         let output = Pipe(); let errors = Pipe(); process.standardOutput = output; process.standardError = errors
         try process.run()
 
@@ -528,6 +547,7 @@ private final class CodexRateLimitClient: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["codex", "app-server", "--listen", "stdio://"]
+        process.environment = ToolEnvironment.current
         let stdin = Pipe(); let stdout = Pipe()
         process.standardInput = stdin; process.standardOutput = stdout; process.standardError = Pipe()
         guard (try? process.run()) != nil else { return nil }
