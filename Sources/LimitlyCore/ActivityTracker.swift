@@ -57,3 +57,48 @@ public struct ActivityTracker: Sendable {
         return idleEvents
     }
 }
+
+/// The same active → idle state machine as `ActivityTracker`, driven by when
+/// each agent's logs were last written instead of by token totals. Totals are
+/// only re-measured every so often (see `CCUsageRefreshPolicy`), so judging
+/// idleness by them would make an idle timeout shorter than that cadence fire
+/// while the agent is still working.
+public struct LogActivityTracker: Sendable {
+    private struct State: Sendable {
+        var lastWrite: Date
+        var isActive: Bool
+    }
+
+    private var states: [AgentID: State] = [:]
+
+    public init() {}
+
+    public mutating func observe(
+        lastWrites: [AgentID: Date],
+        at date: Date,
+        idleInterval: TimeInterval
+    ) -> [IdleEvent] {
+        var idleEvents: [IdleEvent] = []
+
+        for (agent, lastWrite) in lastWrites {
+            guard var state = states[agent] else {
+                // Like `ActivityTracker`, the first sighting is a baseline:
+                // a write we only learn about at launch is not new activity.
+                states[agent] = State(lastWrite: lastWrite, isActive: false)
+                continue
+            }
+
+            if lastWrite > state.lastWrite {
+                state.lastWrite = lastWrite
+                state.isActive = true
+            } else if state.isActive, date.timeIntervalSince(state.lastWrite) >= max(0, idleInterval) {
+                idleEvents.append(IdleEvent(agent: agent, idleSince: state.lastWrite))
+                state.isActive = false
+            }
+
+            states[agent] = state
+        }
+
+        return idleEvents
+    }
+}

@@ -17,17 +17,19 @@ final class UsageMonitor: ObservableObject {
 
     private var thresholdDetector = ThresholdDetector()
     private var weeklyDetector = WeeklyThresholdDetector()
-    private var activityTracker = ActivityTracker()
+    private var logActivityTracker = LogActivityTracker()
     private var sessionActivityTracker = SessionActivityTracker()
     private let banner = BannerController()
 
-    private var ccusageTimer: Timer?
+    /// Reads the cheap local sources (two small JSON files and Ghostty's tab
+    /// list) and re-resolves everything against the clock.
+    private var localTimer: Timer?
     private var codexTimer: Timer?
-    private var tickTimer: Timer?
+    private var logWatcher: LogWatcher?
 
-    /// `refreshCCUsage` shells out to `npx ccusage` twice, each with a 20s
-    /// timeout; guarding against overlap keeps a slow call from letting the
-    /// timer pile up concurrent subprocesses that all contend for npm's
+    /// `refreshCCUsage` shells out to `npx ccusage` (up to twice), each with
+    /// a 20s timeout; guarding against overlap keeps a slow call from letting
+    /// the timer pile up concurrent subprocesses that all contend for npm's
     /// shared package-install lock.
     private var isFetchingCCUsage = false
     /// Deliberately a *separate* guard from the one above. These two sources
@@ -35,23 +37,49 @@ final class UsageMonitor: ObservableObject {
     /// the Codex probe for tens of seconds at a time — the main reason Codex's
     /// number went stale far more often than Claude's.
     private var isProbingCodex = false
+    /// Kept apart from `npx` for the same reason: the real Claude percentages
+    /// come from these files, and must not wait on a `ccusage` run.
+    private var isReadingLocal = false
 
+    private let ccusagePolicy = CCUsageRefreshPolicy()
+    private var lastBlocksRun: Date?
+    private var lastDailyRun: Date?
+    /// Bumped on every batch of log writes the watcher reports; a pass that
+    /// succeeds records the value it started from, so writes that land
+    /// mid-run still count as unseen.
+    private var logGeneration = 0
+    private var claudeLogGeneration = 0
+    private var dailySeenGeneration = -1
+    private var blocksSeenGeneration = -1
+    /// When each agent's logs were last written, as reported by `logWatcher`.
+    private var lastLogWrite: [AgentID: Date] = [:]
+
+    private var ccusageRows: [AgentID: [DatedUsage]]?
+    /// `nil` until a `blocks` pass has succeeded — distinct from an empty
+    /// list, which positively means no session is active.
+    private var ccusageBlocks: [SessionBlock]?
+    private var ccusageError: String?
+    private var localSources = LocalClaudeSources()
     private var ccusagePortion = CCUsagePortion()
     private var codexWindows: AgentUsageWindows?
 
     init() {
+        logWatcher = LogWatcher { [weak self] agents in
+            let now = Date()
+            Task { @MainActor in self?.noteLogWrites(agents, at: now) }
+        }
         refresh()
-        ccusageTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshCCUsage() }
+        localTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshLocal()
+                self?.refreshCCUsage()
+            }
         }
         codexTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshCodex() }
         }
-        tickTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.rebuild() }
-        }
     }
-    deinit { ccusageTimer?.invalidate(); codexTimer?.invalidate(); tickTimer?.invalidate() }
+    deinit { localTimer?.invalidate(); codexTimer?.invalidate() }
 
     // MARK: - Display
 
@@ -159,23 +187,57 @@ final class UsageMonitor: ObservableObject {
     // MARK: - Refresh
 
     func refresh(force: Bool = false) {
-        refreshCCUsage()
+        refreshLocal()
+        refreshCCUsage(force: force)
         refreshCodex(force: force)
     }
 
-    private func refreshCCUsage() {
-        guard !isFetchingCCUsage else { return }
-        isFetchingCCUsage = true
-        updateBusyFlag()
+    private func refreshLocal() {
+        guard !isReadingLocal else { return }
+        isReadingLocal = true
         let idleNotificationsEnabled = settings.idleNotificationsEnabled
         Task.detached { [weak self] in
-            let result = Result { try CCUsageClient.fetch() }
+            let sources = LocalClaudeSources(
+                statusLine: ClaudeStatusLineUsageFile.currentSnapshot(),
+                desktop: ClaudeDesktopUsageClient.currentSnapshot()
+            )
             // Skip the AppleScript round-trip entirely when idle
             // notifications are off — no point paying for it on every
             // 5-second refresh if nothing will use it.
             let terminals = idleNotificationsEnabled ? GhosttyController.openTerminals() : []
-            await self?.applyCCUsage(result, terminals: terminals)
+            await self?.applyLocal(sources, terminals: terminals)
         }
+    }
+
+    /// Runs only the `ccusage` passes `ccusagePolicy` says are due — nothing
+    /// at all while no log is being written. `force` (the manual Refresh
+    /// button) runs both.
+    private func refreshCCUsage(force: Bool = false) {
+        guard !isFetchingCCUsage else { return }
+        let now = Date()
+        let state = CCUsageRefreshPolicy.State(
+            lastBlocksRun: lastBlocksRun,
+            lastDailyRun: lastDailyRun,
+            logsChangedSinceBlocks: claudeLogGeneration != blocksSeenGeneration,
+            logsChangedSinceDaily: logGeneration != dailySeenGeneration,
+            activeBlockEnd: ccusageBlocks?.first(where: \.isActive)?.endTime
+        )
+        let plan = force ? CCUsageRefreshPolicy.Plan(blocks: true, daily: true) : ccusagePolicy.plan(now: now, state: state)
+        guard !plan.isEmpty else { return }
+        isFetchingCCUsage = true
+        updateBusyFlag()
+        let generation = logGeneration
+        let claudeGeneration = claudeLogGeneration
+        Task.detached { [weak self] in
+            let fetched = CCUsageClient.fetch(plan)
+            await self?.applyCCUsage(fetched, plan: plan, startedAt: now, generation: generation, claudeGeneration: claudeGeneration)
+        }
+    }
+
+    private func noteLogWrites(_ agents: Set<AgentID>, at date: Date) {
+        for agent in agents { lastLogWrite[agent] = date }
+        logGeneration += 1
+        if agents.contains(.claude) { claudeLogGeneration += 1 }
     }
 
     /// `force` bypasses the probe's short cache — the automatic timer never
@@ -192,21 +254,76 @@ final class UsageMonitor: ObservableObject {
         }
     }
 
-    private func applyCCUsage(_ result: Result<CCUsagePortion, Error>, terminals: [GhosttyTerminal]) {
-        isFetchingCCUsage = false
-        updateBusyFlag()
-        switch result {
-        case .success(let portion):
-            ccusagePortion = portion
-            lastError = nil
-        case .failure(let error):
-            // Don't blank out what the independent real-percentage sources
-            // already gave us — a ccusage failure only costs the
-            // budget-estimate fallback and the token/dollar totals.
-            lastError = "ccusage refresh failed: \(error.localizedDescription)"
-        }
+    private func applyLocal(_ sources: LocalClaudeSources, terminals: [GhosttyTerminal]) {
+        isReadingLocal = false
+        localSources = sources
+        recompose()
         rebuild()
         evaluateIdle(terminals: terminals)
+    }
+
+    private func applyCCUsage(_ fetched: CCUsageFetch, plan: CCUsageRefreshPolicy.Plan, startedAt: Date, generation: Int, claudeGeneration: Int) {
+        isFetchingCCUsage = false
+        updateBusyFlag()
+        // A failed pass still counts as a run, so a broken `npx` is retried
+        // at the policy's pace rather than on every tick — but its generation
+        // is not marked seen, so the retry does come.
+        if plan.daily {
+            lastDailyRun = startedAt
+            if let rows = fetched.rows {
+                ccusageRows = rows
+                ccusageError = nil
+                dailySeenGeneration = generation
+            } else {
+                ccusageError = fetched.dailyError
+            }
+        }
+        if plan.blocks {
+            lastBlocksRun = startedAt
+            if let blocks = fetched.blocks {
+                ccusageBlocks = blocks
+                blocksSeenGeneration = claudeGeneration
+            }
+        }
+        recompose()
+        rebuild()
+    }
+
+    /// Combines the last `ccusage` results with the latest local readings.
+    /// Cheap, so it runs on every local tick: that is what lets the real
+    /// percentages stay live while `ccusage` itself sits idle.
+    private func recompose(now: Date = Date()) {
+        let parser = CCUsageParser()
+        let rows = ccusageRows ?? [:]
+        var currentUsage = parser.usages(on: now, rows: rows)
+        // A cached block that has run out is no longer active, even before
+        // the `blocks` pass that will confirm it lands.
+        let activeBlock = ccusageBlocks?.first { $0.isActive && $0.endTime > now }
+        if let activeBlock {
+            currentUsage[.claude] = activeBlock.usage
+        } else if ccusageBlocks != nil {
+            // Genuinely no active session, as opposed to the `blocks`
+            // subprocess call itself failing (network hiccup, non-zero
+            // exit, bad JSON) — in that failure case, overwriting with a
+            // hard zero would visibly contradict a real non-zero percent
+            // shown from the independent real sources.
+            currentUsage[.claude] = UsageTotals(totalTokens: 0, totalCost: 0)
+        }
+        let claudeWindows = ClaudeWindowResolver.windows(
+            statusLine: localSources.statusLine,
+            desktop: localSources.desktop,
+            ccusageBlockEnd: activeBlock?.endTime,
+            now: now
+        )
+        ccusagePortion = CCUsagePortion(currentUsage: currentUsage, weeklyUsage: parser.aggregate(rows), claude: claudeWindows)
+        // Don't surface a ccusage failure while a real percentage is there
+        // to fall back on — that is still a useful, working display; it only
+        // costs the budget-estimate fallback and the token/dollar totals.
+        if let ccusageError, claudeWindows == nil {
+            lastError = "ccusage refresh failed: \(ccusageError)"
+        } else {
+            lastError = nil
+        }
     }
 
     private func applyCodex(_ dated: DatedCodexSnapshot?) {
@@ -303,8 +420,8 @@ final class UsageMonitor: ObservableObject {
             at: now,
             idleInterval: settings.idleSeconds
         )
-        let fallbackUsages = snapshot.currentUsage.filter { !sessionObservation.matchedAgents.contains($0.key) }
-        let idleEvents = activityTracker.observe(usages: fallbackUsages, at: now, idleInterval: settings.idleSeconds)
+        let fallbackWrites = lastLogWrite.filter { !sessionObservation.matchedAgents.contains($0.key) }
+        let idleEvents = logActivityTracker.observe(lastWrites: fallbackWrites, at: now, idleInterval: settings.idleSeconds)
         for event in sessionObservation.idleEvents {
             deliver(
                 title: "\(event.agent.displayName) is idle",
@@ -353,9 +470,6 @@ final class UsageMonitor: ObservableObject {
     }
 }
 
-/// Everything one `ccusage` pass produces: the locally-measured token/dollar
-/// totals that back the budget estimate, plus whatever Claude windows the
-/// local sources could supply.
 /// An app launched from Finder or at login inherits launchd's bare
 /// `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, not the shell's, so `/usr/bin/env`
 /// can't find `codex` or `npx` (nor the `node` their shebangs need) in
@@ -375,10 +489,26 @@ private enum ToolEnvironment {
     }()
 }
 
+/// Everything the `ccusage` side contributes: the locally-measured
+/// token/dollar totals that back the budget estimate, plus whatever Claude
+/// windows the local sources could supply.
 private struct CCUsagePortion: Sendable {
     var currentUsage: [AgentID: UsageTotals] = [:]
     var weeklyUsage: [AgentID: UsageTotals] = [:]
     var claude: AgentUsageWindows?
+}
+
+private struct LocalClaudeSources: Sendable {
+    var statusLine: ClaudeStatusLineSnapshot?
+    var desktop: PlanUsageSnapshot?
+}
+
+/// What one `CCUsageClient.fetch` produced; `nil` for a pass that was not
+/// run or failed.
+private struct CCUsageFetch: Sendable {
+    var rows: [AgentID: [DatedUsage]]?
+    var dailyError: String?
+    var blocks: [SessionBlock]?
 }
 
 private struct DatedCodexSnapshot: Sendable {
@@ -398,59 +528,28 @@ private enum CCUsageClient {
     /// so `@latest` was making this fail on every single 5-second refresh.
     private static let ccusagePackage = "ccusage@20.0.20"
 
-    static func fetch(now: Date = Date()) throws -> CCUsagePortion {
-        let calendar = Calendar.current
-        let since = calendar.date(byAdding: .day, value: -6, to: now) ?? now
-        let formatter = DateFormatter(); formatter.calendar = calendar; formatter.dateFormat = "yyyy-MM-dd"
+    /// Runs only the passes `plan` asks for. Failures come back as `nil`
+    /// results so the caller can keep the last good figures.
+    static func fetch(_ plan: CCUsageRefreshPolicy.Plan, now: Date = Date()) -> CCUsageFetch {
         let parser = CCUsageParser()
-
-        var ccusageError: Error?
-        var rows: [AgentID: [DatedUsage]] = [:]
-        do {
-            let dailyData = try run(["--yes", ccusagePackage, "daily", "--json", "--by-agent", "--since", formatter.string(from: since), "--offline"])
-            rows = try parser.parseDailyRows(dailyData)
-        } catch {
-            ccusageError = error
+        var result = CCUsageFetch()
+        if plan.daily {
+            let calendar = Calendar.current
+            let since = calendar.date(byAdding: .day, value: -6, to: now) ?? now
+            let formatter = DateFormatter(); formatter.calendar = calendar; formatter.dateFormat = "yyyy-MM-dd"
+            do {
+                let dailyData = try run(["--yes", ccusagePackage, "daily", "--json", "--by-agent", "--since", formatter.string(from: since), "--offline"])
+                result.rows = try parser.parseDailyRows(dailyData)
+            } catch {
+                result.dailyError = error.localizedDescription
+            }
         }
-        var blocksFetchSucceeded = false
-        var blocks: [SessionBlock] = []
-        if let blocksData = try? run(["--yes", ccusagePackage, "blocks", "--json", "--active", "--offline"]),
-           let parsedBlocks = try? parser.parseBlocks(blocksData) {
-            blocksFetchSucceeded = true
-            blocks = parsedBlocks
+        if plan.blocks,
+           let blocksData = try? run(["--yes", ccusagePackage, "blocks", "--json", "--active", "--offline"]),
+           let blocks = try? parser.parseBlocks(blocksData) {
+            result.blocks = blocks
         }
-        let activeBlock = blocks.first(where: \.isActive)
-        var currentUsage = parser.usages(on: now, rows: rows, calendar: calendar)
-        if let activeBlock {
-            currentUsage[.claude] = activeBlock.usage
-        } else if blocksFetchSucceeded {
-            // Genuinely no active session, as opposed to the `blocks`
-            // subprocess call itself failing (network hiccup, non-zero
-            // exit, bad JSON) — in that failure case, overwriting with a
-            // hard zero would visibly contradict a real non-zero percent
-            // shown from the independent real sources.
-            currentUsage[.claude] = UsageTotals(totalTokens: 0, totalCost: 0)
-        }
-
-        let claudeWindows = ClaudeWindowResolver.windows(
-            statusLine: ClaudeStatusLineUsageFile.currentSnapshot(),
-            desktop: ClaudeDesktopUsageClient.currentSnapshot(),
-            ccusageBlockEnd: activeBlock?.endTime,
-            now: now
-        )
-
-        // Only surface the ccusage failure if there is no real percentage to
-        // fall back on anyway — otherwise this would still be a useful,
-        // working refresh.
-        if let ccusageError, claudeWindows == nil {
-            throw ccusageError
-        }
-
-        return CCUsagePortion(
-            currentUsage: currentUsage,
-            weeklyUsage: parser.aggregate(rows),
-            claude: claudeWindows
-        )
+        return result
     }
 
     /// `npx` can stall for minutes if it contends with another concurrent
