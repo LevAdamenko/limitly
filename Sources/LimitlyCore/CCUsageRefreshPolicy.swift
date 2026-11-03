@@ -9,6 +9,10 @@ import Foundation
 /// change unless a log is written, a day ends, or the active block expires, so
 /// those are the only things that trigger a pass — plus a slow safety net for
 /// a missed filesystem event.
+///
+/// Even then, a pass only runs when its output would be looked at: the menu
+/// bar shows the providers' real percentages, so the token and dollar totals
+/// matter only in the open popover or when a real figure is missing.
 public struct CCUsageRefreshPolicy: Sendable {
     public struct State: Equatable, Sendable {
         public var lastBlocksRun: Date?
@@ -16,19 +20,24 @@ public struct CCUsageRefreshPolicy: Sendable {
         public var logsChangedSinceBlocks: Bool
         public var logsChangedSinceDaily: Bool
         public var activeBlockEnd: Date?
+        /// Something will read the result. After the first pass of each kind,
+        /// no pass starts while this is false.
+        public var resultNeeded: Bool
 
         public init(
             lastBlocksRun: Date? = nil,
             lastDailyRun: Date? = nil,
             logsChangedSinceBlocks: Bool = false,
             logsChangedSinceDaily: Bool = false,
-            activeBlockEnd: Date? = nil
+            activeBlockEnd: Date? = nil,
+            resultNeeded: Bool = true
         ) {
             self.lastBlocksRun = lastBlocksRun
             self.lastDailyRun = lastDailyRun
             self.logsChangedSinceBlocks = logsChangedSinceBlocks
             self.logsChangedSinceDaily = logsChangedSinceDaily
             self.activeBlockEnd = activeBlockEnd
+            self.resultNeeded = resultNeeded
         }
     }
 
@@ -63,6 +72,7 @@ public struct CCUsageRefreshPolicy: Sendable {
 
     private func blocksDue(now: Date, state: State) -> Bool {
         guard let last = state.lastBlocksRun else { return true }
+        guard state.resultNeeded else { return false }
         let elapsed = now.timeIntervalSince(last)
         if elapsed >= safetyInterval || elapsed < 0 { return true }
         if state.logsChangedSinceBlocks && elapsed >= blocksInterval { return true }
@@ -74,6 +84,7 @@ public struct CCUsageRefreshPolicy: Sendable {
 
     private func dailyDue(now: Date, state: State, calendar: Calendar) -> Bool {
         guard let last = state.lastDailyRun else { return true }
+        guard state.resultNeeded else { return false }
         let elapsed = now.timeIntervalSince(last)
         if elapsed >= safetyInterval || elapsed < 0 { return true }
         if state.logsChangedSinceDaily && elapsed >= dailyInterval { return true }

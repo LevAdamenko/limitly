@@ -47,6 +47,22 @@ final class CCUsageRefreshPolicyTests: XCTestCase {
         XCTAssertEqual(policy.plan(now: beforeMidnight.addingTimeInterval(20), state: state, calendar: calendar), .init(blocks: false, daily: true))
     }
 
+    func testFirstRunHappensEvenWhenNothingNeedsTheResult() {
+        let state = CCUsageRefreshPolicy.State(resultNeeded: false)
+        XCTAssertEqual(policy.plan(now: noon, state: state, calendar: calendar), .init(blocks: true, daily: true))
+    }
+
+    func testNothingRunsWhenNothingNeedsTheResult() {
+        let state = CCUsageRefreshPolicy.State(lastBlocksRun: noon, lastDailyRun: noon, logsChangedSinceBlocks: true, logsChangedSinceDaily: true, resultNeeded: false)
+        // Past every trigger: changed logs, the safety net and midnight.
+        XCTAssertTrue(policy.plan(now: noon.addingTimeInterval(24 * 3600), state: state, calendar: calendar).isEmpty)
+    }
+
+    func testChangedLogsRunAsSoonAsTheResultIsNeededAgain() {
+        let state = CCUsageRefreshPolicy.State(lastBlocksRun: noon, lastDailyRun: noon, logsChangedSinceBlocks: true, logsChangedSinceDaily: true, resultNeeded: true)
+        XCTAssertEqual(policy.plan(now: noon.addingTimeInterval(120), state: state, calendar: calendar), .init(blocks: true, daily: true))
+    }
+
     func testClockGoingBackwardsRefetches() {
         let state = CCUsageRefreshPolicy.State(lastBlocksRun: noon, lastDailyRun: noon)
         XCTAssertEqual(policy.plan(now: noon.addingTimeInterval(-60), state: state, calendar: calendar), .init(blocks: true, daily: true))

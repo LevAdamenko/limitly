@@ -30,7 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var snapshotCancellable: AnyCancellable?
-    private var iconColorCancellable: AnyCancellable?
+    private var settingsCancellable: AnyCancellable?
+    /// What the status item currently shows; see `updateTitle`.
+    private var displayedTitleKey: String?
     private var globalClickMonitor: Any?
     private var localClickMonitor: Any?
 
@@ -51,13 +53,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         snapshotCancellable = monitor.$snapshot
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateTitle() }
-        iconColorCancellable = monitor.settings.$iconColor
+        // The title depends on more settings than the icon colour: display
+        // mode and budgets change the number too, and `snapshot` no longer
+        // republishes on a timer to pick that up.
+        settingsCancellable = monitor.settings.objectWillChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.updateTitle() }
     }
 
     private func updateTitle() {
         guard let button = statusItem?.button else { return }
+        // Setting the title redraws the status item, and most updates leave
+        // the visible text exactly as it was.
+        let key = AgentID.allCases.map { monitor.percentageText(for: $0) }.joined(separator: "|") + "|\(monitor.settings.iconColor)"
+        guard key != displayedTitleKey else { return }
+        displayedTitleKey = key
         let font = NSFont.menuBarFont(ofSize: 0)
         let iconSize: CGFloat = 17
 
@@ -87,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if pop.isShown {
             closePopover()
         } else {
+            monitor.setPopoverVisible(true)
             pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             startOutsideClickMonitor()
         }
@@ -98,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
+        monitor.setPopoverVisible(false)
         stopOutsideClickMonitor()
     }
 

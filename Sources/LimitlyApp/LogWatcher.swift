@@ -84,9 +84,10 @@ final class LogWatcher: @unchecked Sendable {
             roots.map(\.path) as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
             // Coalesces a burst of appends (a streaming reply writes many
-            // lines) into one wake-up.
-            2.0,
-            FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes | kFSEventStreamCreateFlagNoDefer)
+            // lines) into one wake-up. Nothing that reads this needs it any
+            // sooner, and running agents write constantly.
+            10.0,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagUseCFTypes)
         ) else { return }
         FSEventStreamSetDispatchQueue(stream, queue)
         FSEventStreamStart(stream)
@@ -102,4 +103,33 @@ final class LogWatcher: @unchecked Sendable {
         }
         if !agents.isEmpty { onChange(agents) }
     }
+}
+
+/// Reports changes to one directory's entries, which is how an atomic rename
+/// into it shows up. Costs nothing until something changes there.
+final class DirectoryWatcher: @unchecked Sendable {
+    private let source: DispatchSourceFileSystemObject
+    private let queue = DispatchQueue(label: "limitly.directory-watcher", qos: .utility)
+    /// Touched only on `queue`.
+    private var isPending = false
+
+    /// `nil` when the directory does not exist yet.
+    init?(url: URL, onChange: @escaping @Sendable () -> Void) {
+        let descriptor = open(url.path, O_EVTONLY)
+        guard descriptor >= 0 else { return nil }
+        source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: .write, queue: queue)
+        source.setEventHandler { [weak self] in
+            // A temp-file write and its rename arrive as separate events.
+            guard let self, !self.isPending else { return }
+            self.isPending = true
+            self.queue.asyncAfter(deadline: .now() + 1) {
+                self.isPending = false
+                onChange()
+            }
+        }
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
+    }
+
+    deinit { source.cancel() }
 }

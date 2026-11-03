@@ -1,3 +1,5 @@
+import AppKit
+import Combine
 import Foundation
 import SwiftUI
 import UserNotifications
@@ -7,10 +9,8 @@ import LimitlyCore
 final class UsageMonitor: ObservableObject {
     @Published private(set) var snapshot = UsageSnapshot(currentUsage: [:], weeklyUsage: [:])
     @Published private(set) var lastError: String?
-    /// The moment `snapshot`'s windows were last interpreted. Republished on
-    /// a short tick so countdowns advance and a window that has just passed
-    /// its reset time drops to 0% on its own, without waiting for the next
-    /// poll to land.
+    /// The moment `snapshot`'s windows were last interpreted. While the popover
+    /// is closed it only moves along with `snapshot`, since nothing reads it.
     @Published private(set) var resolvedAt = Date()
     @Published private(set) var isRefreshing = false
     let settings = SettingsStore()
@@ -21,11 +21,20 @@ final class UsageMonitor: ObservableObject {
     private var sessionActivityTracker = SessionActivityTracker()
     private let banner = BannerController()
 
-    /// Reads the cheap local sources (two small JSON files and Ghostty's tab
-    /// list) and re-resolves everything against the clock.
-    private var localTimer: Timer?
-    private var codexTimer: Timer?
+    /// A slow housekeeping pass: changes normally arrive through the watchers
+    /// below, so this only has to catch what they cannot report. See
+    /// `tickInterval`.
+    private var tickTimer: Timer?
+    /// Fires exactly when the next real reset time passes, so a window drops
+    /// to 0% on time without a fast timer running all day.
+    private var resetTimer: Timer?
+    private var scheduledResetDate: Date?
     private var logWatcher: LogWatcher?
+    /// Reports new status-line readings as soon as they land.
+    private var statusLineWatcher: DirectoryWatcher?
+    private var settingsCancellable: AnyCancellable?
+    private var wakeObserver: NSObjectProtocol?
+    private var isPopoverVisible = false
 
     /// `refreshCCUsage` shells out to `npx ccusage` (up to twice), each with
     /// a 20s timeout; guarding against overlap keeps a slow call from letting
@@ -42,6 +51,11 @@ final class UsageMonitor: ObservableObject {
     private var isReadingLocal = false
 
     private let ccusagePolicy = CCUsageRefreshPolicy()
+    private let codexPolicy = CodexProbePolicy()
+    private var lastCodexProbe: Date?
+    private var lastCodexProbeFailed = false
+    private var codexLogGeneration = 0
+    private var codexSeenGeneration = 0
     private var lastBlocksRun: Date?
     private var lastDailyRun: Date?
     /// Bumped on every batch of log writes the watcher reports; a pass that
@@ -68,18 +82,72 @@ final class UsageMonitor: ObservableObject {
             let now = Date()
             Task { @MainActor in self?.noteLogWrites(agents, at: now) }
         }
+        ClaudeStatusLineInstaller.refreshScriptIfInstalled()
+        watchStatusLineIfNeeded()
         refresh()
-        localTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refreshLocal()
-                self?.refreshCCUsage()
+        rescheduleTick()
+        settingsCancellable = settings.objectWillChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.rescheduleTick() }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            // The network usually needs a moment after waking up.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                MainActor.assumeIsolated {
+                    self?.refreshLocal()
+                    self?.refreshCodex(force: true)
+                }
             }
         }
-        codexTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshCodex() }
+    }
+    deinit {
+        tickTimer?.invalidate()
+        resetTimer?.invalidate()
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+    }
+
+    /// Countdowns in the open popover and idle detection are the only things
+    /// that need a quicker pace.
+    private var tickInterval: TimeInterval { isPopoverVisible || settings.idleNotificationsEnabled ? 15 : 60 }
+
+    private func rescheduleTick() {
+        let interval = tickInterval
+        if let tickTimer, tickTimer.isValid, tickTimer.timeInterval == interval { return }
+        tickTimer?.invalidate()
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
+        // Lets macOS batch this wake-up with others.
+        timer.tolerance = interval / 3
+        tickTimer = timer
+    }
+
+    private func tick() {
+        watchStatusLineIfNeeded()
+        refreshLocal()
+        refreshCCUsage()
+        refreshCodexIfDue()
+    }
+
+    /// `~/.limitly` only exists once the status line has been connected.
+    private func watchStatusLineIfNeeded() {
+        guard statusLineWatcher == nil else { return }
+        statusLineWatcher = DirectoryWatcher(url: ClaudeStatusLineInstaller.limitlyDirectoryURL) { [weak self] in
+            Task { @MainActor in self?.refreshLocal() }
         }
     }
-    deinit { localTimer?.invalidate(); codexTimer?.invalidate() }
+
+    /// Called by the status item as the popover opens and closes.
+    func setPopoverVisible(_ visible: Bool) {
+        guard visible != isPopoverVisible else { return }
+        isPopoverVisible = visible
+        rescheduleTick()
+        guard visible else { return }
+        refreshLocal()
+        refreshCCUsage()
+        refreshCodexIfDue()
+    }
 
     // MARK: - Display
 
@@ -137,9 +205,9 @@ final class UsageMonitor: ObservableObject {
 
     private static func staleAfter(_ source: UsageSource) -> TimeInterval {
         switch source {
-        // Polled every 30 seconds; five minutes without a fresh reading means
-        // the local app-server is failing, not merely idle.
-        case .codexAppServer: return 5 * 60
+        // Probed at least every five minutes, even on a quiet machine; a
+        // reading older than two missed probes means the probe is failing.
+        case .codexAppServer: return 12 * 60
         // Only written while some Claude Code session renders its status
         // line — but while nobody is using Claude Code, the figure is not
         // going anywhere either, and the window's real reset time (which this
@@ -196,22 +264,22 @@ final class UsageMonitor: ObservableObject {
         guard !isReadingLocal else { return }
         isReadingLocal = true
         let idleNotificationsEnabled = settings.idleNotificationsEnabled
-        Task.detached { [weak self] in
+        Task.detached(priority: .utility) { [weak self] in
             let sources = LocalClaudeSources(
                 statusLine: ClaudeStatusLineUsageFile.currentSnapshot(),
                 desktop: ClaudeDesktopUsageClient.currentSnapshot()
             )
             // Skip the AppleScript round-trip entirely when idle
             // notifications are off — no point paying for it on every
-            // 5-second refresh if nothing will use it.
+            // refresh if nothing will use it.
             let terminals = idleNotificationsEnabled ? GhosttyController.openTerminals() : []
             await self?.applyLocal(sources, terminals: terminals)
         }
     }
 
     /// Runs only the `ccusage` passes `ccusagePolicy` says are due — nothing
-    /// at all while no log is being written. `force` (the manual Refresh
-    /// button) runs both.
+    /// at all while no log is being written or nothing would read the result.
+    /// `force` (the manual Refresh button) runs both.
     private func refreshCCUsage(force: Bool = false) {
         guard !isFetchingCCUsage else { return }
         let now = Date()
@@ -220,7 +288,8 @@ final class UsageMonitor: ObservableObject {
             lastDailyRun: lastDailyRun,
             logsChangedSinceBlocks: claudeLogGeneration != blocksSeenGeneration,
             logsChangedSinceDaily: logGeneration != dailySeenGeneration,
-            activeBlockEnd: ccusageBlocks?.first(where: \.isActive)?.endTime
+            activeBlockEnd: ccusageBlocks?.first(where: \.isActive)?.endTime,
+            resultNeeded: isPopoverVisible || isMissingRealPercentage
         )
         let plan = force ? CCUsageRefreshPolicy.Plan(blocks: true, daily: true) : ccusagePolicy.plan(now: now, state: state)
         guard !plan.isEmpty else { return }
@@ -228,16 +297,36 @@ final class UsageMonitor: ObservableObject {
         updateBusyFlag()
         let generation = logGeneration
         let claudeGeneration = claudeLogGeneration
-        Task.detached { [weak self] in
+        Task.detached(priority: .utility) { [weak self] in
             let fetched = CCUsageClient.fetch(plan)
             await self?.applyCCUsage(fetched, plan: plan, startedAt: now, generation: generation, claudeGeneration: claudeGeneration)
         }
+    }
+
+    /// The budget estimate behind a missing real percentage comes from
+    /// `ccusage`, for both the menu bar and threshold alerts. With every real
+    /// figure present, its totals only appear in the popover.
+    private var isMissingRealPercentage: Bool {
+        AgentID.allCases.contains { snapshot.realCurrentPercentages[$0] == nil || snapshot.realWeeklyPercentages[$0] == nil }
     }
 
     private func noteLogWrites(_ agents: Set<AgentID>, at date: Date) {
         for agent in agents { lastLogWrite[agent] = date }
         logGeneration += 1
         if agents.contains(.claude) { claudeLogGeneration += 1 }
+        if agents.contains(.codex) { codexLogGeneration += 1 }
+        refreshCCUsage()
+        refreshCodexIfDue()
+    }
+
+    private func refreshCodexIfDue() {
+        let state = CodexProbePolicy.State(
+            lastAttempt: lastCodexProbe,
+            logsChangedSinceProbe: codexLogGeneration != codexSeenGeneration,
+            lastAttemptFailed: lastCodexProbeFailed,
+            isForeground: isPopoverVisible
+        )
+        if codexPolicy.isDue(now: Date(), state: state) { refreshCodex() }
     }
 
     /// `force` bypasses the probe's short cache — the automatic timer never
@@ -248,9 +337,12 @@ final class UsageMonitor: ObservableObject {
         guard !isProbingCodex else { return }
         isProbingCodex = true
         updateBusyFlag()
-        Task.detached { [weak self] in
-            let dated = CodexRateLimitClient.shared.currentSnapshot(forceRefresh: force)
-            await self?.applyCodex(dated)
+        let startedAt = Date()
+        let generation = codexLogGeneration
+        lastCodexProbe = startedAt
+        Task.detached(priority: .utility) { [weak self] in
+            let dated = CodexRateLimitClient.shared.currentSnapshot(now: startedAt, forceRefresh: force)
+            await self?.applyCodex(dated, startedAt: startedAt, generation: generation)
         }
     }
 
@@ -326,9 +418,14 @@ final class UsageMonitor: ObservableObject {
         }
     }
 
-    private func applyCodex(_ dated: DatedCodexSnapshot?) {
+    private func applyCodex(_ dated: DatedCodexSnapshot?, startedAt: Date, generation: Int) {
         isProbingCodex = false
         updateBusyFlag()
+        // A failed probe hands back the previous reading with its original
+        // date, so an old date is what failure looks like from here.
+        let succeeded = dated.map { $0.observedAt >= startedAt } ?? false
+        lastCodexProbeFailed = !succeeded
+        if succeeded { codexSeenGeneration = generation }
         if let dated {
             codexWindows = AgentUsageWindows(
                 session: RateLimitWindow(
@@ -355,8 +452,8 @@ final class UsageMonitor: ObservableObject {
     // MARK: - Resolution
 
     /// Re-interprets everything currently known against the clock and
-    /// republishes. Cheap and side-effect-free apart from threshold alerts,
-    /// which is why the display tick can call it every few seconds.
+    /// publishes only what changed, so an unchanged reading redraws nothing.
+    /// Cheap and side-effect-free apart from threshold alerts.
     private func rebuild(now: Date = Date()) {
         var windows: [AgentID: AgentUsageWindows] = [:]
         if let claude = ccusagePortion.claude { windows[.claude] = claude }
@@ -377,7 +474,7 @@ final class UsageMonitor: ObservableObject {
             }
         }
 
-        snapshot = UsageSnapshot(
+        let rebuilt = UsageSnapshot(
             currentUsage: ccusagePortion.currentUsage,
             weeklyUsage: ccusagePortion.weeklyUsage,
             resetTimes: resets,
@@ -385,8 +482,37 @@ final class UsageMonitor: ObservableObject {
             realWeeklyPercentages: realWeekly,
             windows: windows
         )
-        resolvedAt = now
+        let changed = rebuilt != snapshot
+        if changed { snapshot = rebuilt }
+        if changed || isPopoverVisible { resolvedAt = now }
         evaluateThresholds()
+        scheduleResetTimer(windows: windows, now: now)
+    }
+
+    /// Only real reset times count: an approximate one never rolls a window
+    /// over. See `RateLimitWindow.resetIsApproximate`.
+    private func scheduleResetTimer(windows: [AgentID: AgentUsageWindows], now: Date) {
+        let next = windows.values
+            .flatMap { [$0.session, $0.weekly] }
+            .compactMap { $0 }
+            .filter { !$0.resetIsApproximate }
+            .compactMap(\.resetsAt)
+            .filter { $0 > now }
+            .min()
+        guard next != scheduledResetDate else { return }
+        scheduledResetDate = next
+        resetTimer?.invalidate()
+        resetTimer = nil
+        guard let next else { return }
+        let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                self?.scheduledResetDate = nil
+                self?.rebuild()
+            }
+        }
+        timer.tolerance = 1
+        RunLoop.main.add(timer, forMode: .common)
+        resetTimer = timer
     }
 
     // MARK: - Alerts
@@ -563,6 +689,7 @@ private enum CCUsageClient {
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/env"); process.arguments = ["npx"] + arguments
         var environment = ToolEnvironment.current; environment["npm_config_cache"] = FileManager.default.temporaryDirectory.appendingPathComponent("limitly-npm-cache", isDirectory: true).path; environment["NO_COLOR"] = "1"; process.environment = environment
         let output = Pipe(); let errors = Pipe(); process.standardOutput = output; process.standardError = errors
+        process.qualityOfService = .utility
         try process.run()
 
         var outputData = Data(); var errorData = Data()
@@ -609,9 +736,9 @@ private final class CodexRateLimitClient: @unchecked Sendable {
     static let shared = CodexRateLimitClient()
     private let lock = NSLock()
     private var cached: DatedCodexSnapshot?
-    /// Comfortably under the caller's 30-second poll, so a scheduled poll
-    /// always produces a real probe instead of occasionally landing just
-    /// inside the cache and doubling the effective staleness.
+    /// Comfortably under `CodexProbePolicy`'s shortest interval, so a scheduled
+    /// probe always runs for real instead of occasionally landing just inside
+    /// the cache and doubling the effective staleness.
     private let refreshInterval: TimeInterval = 20
 
     func currentSnapshot(now: Date = Date(), forceRefresh: Bool = false) -> DatedCodexSnapshot? {
@@ -649,6 +776,7 @@ private final class CodexRateLimitClient: @unchecked Sendable {
         process.environment = ToolEnvironment.current
         let stdin = Pipe(); let stdout = Pipe()
         process.standardInput = stdin; process.standardOutput = stdout; process.standardError = Pipe()
+        process.qualityOfService = .utility
         guard (try? process.run()) != nil else { return nil }
         defer { if process.isRunning { process.terminate() } }
 

@@ -53,7 +53,12 @@ public enum ClaudeStatusLineInstaller {
 INPUT=$(cat)
 LIMITLY_DIR="${LIMITLY_DIR:-$HOME/.limitly}"
 
-if [ -n "$INPUT" ]; then
+# Claude Code runs this on every status-line render, often several times a
+# second across sessions. The figures barely move between renders, so Python
+# only starts when the last reading is at least 20 seconds old. If `find` fails
+# or the file is missing, the output is empty and the reading is taken.
+READING="$LIMITLY_DIR/claude-rate-limits.json"
+if [ -n "$INPUT" ] && [ -z "$(find "$READING" -mtime -20s 2>/dev/null)" ]; then
     printf '%s' "$INPUT" | /usr/bin/python3 -c '
 import sys, json, os, time
 
@@ -81,10 +86,8 @@ try:
             payload = {"writtenAt": int(time.time()), "rate_limits": limits}
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f)
-                f.flush()
-                os.fsync(f.fileno())
-            # Rename rather than write in place: Limitly polls this file every
-            # few seconds and must never read a half-written one.
+            # Rename rather than write in place: Limitly reads this file as
+            # soon as it changes and must never see a half-written one.
             os.replace(tmp_path, final_path)
 except Exception:
     pass
@@ -229,6 +232,25 @@ exit 0
 
         // Save atomically
         try writeSettingsAtomically(settingsDict, to: settingsURL)
+    }
+
+    /// Brings an already-connected sidecar up to this version's script. An
+    /// install is otherwise never rewritten, so an improved script would not
+    /// reach anyone who connected before it shipped. Does nothing unless the
+    /// status line is ours and the script is already on disk.
+    public static func refreshScriptIfInstalled() {
+        refreshScriptIfInstalled(settingsURL: claudeSettingsURL, limitlyDir: limitlyDirectoryURL)
+    }
+
+    public static func refreshScriptIfInstalled(settingsURL: URL, limitlyDir: URL) {
+        let scriptURL = limitlyDir.appendingPathComponent("statusline.sh")
+        let chainURL = limitlyDir.appendingPathComponent("statusline-chain")
+        switch state(settingsURL: settingsURL, chainURL: chainURL, scriptURL: scriptURL) {
+        case .installed, .installedAlongside: break
+        case .notInstalled, .claudeSettingsUnreadable: return
+        }
+        guard let current = try? String(contentsOf: scriptURL, encoding: .utf8), current != scriptContent else { return }
+        try? writeScript(to: scriptURL, limitlyDir: limitlyDir)
     }
 
     public static func uninstall() throws {

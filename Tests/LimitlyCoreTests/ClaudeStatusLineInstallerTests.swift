@@ -133,6 +133,60 @@ final class ClaudeStatusLineInstallerTests: XCTestCase {
         XCTAssertTrue(script.hasPrefix("#!/bin/sh"))
     }
 
+    func testRefreshReplacesAnOutdatedScriptWhenConnected() throws {
+        try ClaudeStatusLineInstaller.install(settingsURL: settingsURL, limitlyDir: limitlyDir)
+        try "#!/bin/sh\n# old\n".write(to: scriptURL, atomically: true, encoding: .utf8)
+        ClaudeStatusLineInstaller.refreshScriptIfInstalled(settingsURL: settingsURL, limitlyDir: limitlyDir)
+        XCTAssertEqual(try String(contentsOf: scriptURL, encoding: .utf8), ClaudeStatusLineInstaller.scriptContent)
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: scriptURL.path))
+    }
+
+    func testRefreshLeavesTheScriptAloneWhenDisconnected() throws {
+        try FileManager.default.createDirectory(at: limitlyDir, withIntermediateDirectories: true)
+        try "# not connected\n".write(to: scriptURL, atomically: true, encoding: .utf8)
+        try #"{"statusLine":{"type":"command","command":"/usr/bin/other"}}"#.write(to: settingsURL, atomically: true, encoding: .utf8)
+        ClaudeStatusLineInstaller.refreshScriptIfInstalled(settingsURL: settingsURL, limitlyDir: limitlyDir)
+        XCTAssertEqual(try String(contentsOf: scriptURL, encoding: .utf8), "# not connected\n")
+    }
+
+    private func runScript(input: String) throws -> String {
+        let process = Process()
+        process.executableURL = scriptURL
+        process.environment = ["LIMITLY_DIR": limitlyDir.path, "PATH": "/usr/bin:/bin"]
+        let stdin = Pipe(); let stdout = Pipe()
+        process.standardInput = stdin; process.standardOutput = stdout
+        try process.run()
+        stdin.fileHandleForWriting.write(Data(input.utf8))
+        try stdin.fileHandleForWriting.close()
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return String(decoding: output, as: UTF8.self)
+    }
+
+    func testScriptSkipsAFreshReadingButReplacesAnOldOne() throws {
+        try ClaudeStatusLineInstaller.install(settingsURL: settingsURL, limitlyDir: limitlyDir)
+        let reading = limitlyDir.appendingPathComponent("claude-rate-limits.json")
+        func payload(_ percent: Int) -> String { #"{"rate_limits":{"five_hour":{"used_percentage":\#(percent),"resets_at":1}}}"# }
+
+        _ = try runScript(input: payload(10))
+        XCTAssertTrue(try String(contentsOf: reading, encoding: .utf8).contains(": 10"), "a missing reading is always taken")
+
+        _ = try runScript(input: payload(20))
+        XCTAssertTrue(try String(contentsOf: reading, encoding: .utf8).contains(": 10"), "a fresh reading is left in place")
+
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-21)], ofItemAtPath: reading.path)
+        _ = try runScript(input: payload(30))
+        XCTAssertTrue(try String(contentsOf: reading, encoding: .utf8).contains(": 30"), "an old reading is replaced")
+    }
+
+    func testScriptStillRunsTheChainedStatusLineWhenSkippingTheReading() throws {
+        try ClaudeStatusLineInstaller.install(settingsURL: settingsURL, limitlyDir: limitlyDir)
+        try "cat".write(to: chainURL, atomically: true, encoding: .utf8)
+        let input = #"{"rate_limits":{"five_hour":{"used_percentage":1}}}"#
+        _ = try runScript(input: input)
+        XCTAssertEqual(try runScript(input: input), input)
+    }
+
     func testMissingSettingsFileIsCreatedRatherThanRefused() throws {
         try install()
 
