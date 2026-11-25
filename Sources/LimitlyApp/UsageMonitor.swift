@@ -585,7 +585,7 @@ final class UsageMonitor: ObservableObject {
     /// crossing a threshold is how a bogus alert happens.
     private func percentages(_ snapshot: UsageSnapshot) -> [AgentID: Double] { snapshot.realCurrentPercentages }
     private func weeklyPercentages(_ snapshot: UsageSnapshot) -> [AgentID: Double] { snapshot.realWeeklyPercentages }
-    private func format(_ usage: UsageTotals) -> String { "\(UsageFormat.compactTokens(usage.totalTokens)) · \(UsageFormat.dollars(usage.totalCost))" }
+    private func format(_ usage: UsageTotals) -> String { UsageFormat.totals(usage) }
     private func deliver(title: String, body: String, workingDirectory: String? = nil) {
         if settings.delivery == .banner {
             let onClick: (() -> Void)? = workingDirectory.map { directory in
@@ -677,18 +677,27 @@ private enum CCUsageClient {
             let since = calendar.date(byAdding: .day, value: -6, to: now) ?? now
             let formatter = DateFormatter(); formatter.calendar = calendar; formatter.dateFormat = "yyyy-MM-dd"
             do {
-                let dailyData = try run(["--yes", ccusagePackage, "daily", "--json", "--by-agent", "--since", formatter.string(from: since), "--offline"])
+                let dailyData = try runPriced(["--yes", ccusagePackage, "daily", "--json", "--by-agent", "--since", formatter.string(from: since)])
                 result.rows = try parser.parseDailyRows(dailyData)
             } catch {
                 result.dailyError = error.localizedDescription
             }
         }
         if plan.blocks,
-           let blocksData = try? run(["--yes", ccusagePackage, "blocks", "--json", "--active", "--offline"]),
+           let blocksData = try? runPriced(["--yes", ccusagePackage, "blocks", "--json", "--active"]),
            let blocks = try? parser.parseBlocks(blocksData) {
             result.blocks = blocks
         }
         return result
+    }
+
+    /// ccusage's bundled `--offline` price table only knows the models that
+    /// existed when that version shipped; anything newer (Opus/Sonnet/Haiku
+    /// 5.5 for 20.0.20) is priced at $0, which made 226M tokens show as "$0".
+    /// Online it fetches current prices (~1s extra), so try that first and
+    /// fall back to offline only when there is no network.
+    private static func runPriced(_ arguments: [String]) throws -> Data {
+        do { return try run(arguments) } catch { return try run(arguments + ["--offline"]) }
     }
 
     /// `npx` can stall for minutes if it contends with another concurrent

@@ -17,6 +17,12 @@ final class UsageFormatTests: XCTestCase {
         XCTAssertEqual(UsageFormat.dollars(.nan), "$0")
     }
 
+    func testUnpricedUsageOmitsDollarsInsteadOfShowingZero() {
+        XCTAssertEqual(UsageFormat.totals(UsageTotals(totalTokens: 226_095_830, totalCost: 0)), "226M tokens")
+        XCTAssertEqual(UsageFormat.totals(UsageTotals(totalTokens: 226_095_830, totalCost: 129.1)), "226M tokens · $129")
+        XCTAssertEqual(UsageFormat.totals(UsageTotals(totalTokens: 0, totalCost: 0)), "0 tokens · $0.00")
+    }
+
     func testClampedPercentNeverLeavesZeroToHundred() {
         XCTAssertEqual(UsageFormat.clampedPercent(4_812_000), 100)
         XCTAssertEqual(UsageFormat.clampedPercent(-3), 0)

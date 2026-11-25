@@ -25,6 +25,15 @@ public enum UsageFormat {
         return amount >= 100 ? "$\(Int(amount.rounded()))" : String(format: "$%.2f", amount)
     }
 
+    /// Tokens plus dollars — but a zero cost next to non-zero tokens means
+    /// ccusage had no price for the model, not that it was free, so the
+    /// dollar part is left out rather than shown as a misleading "$0".
+    public static func totals(_ usage: UsageTotals) -> String {
+        let tokens = compactTokens(usage.totalTokens)
+        guard usage.totalCost > 0 || usage.totalTokens == 0 else { return tokens }
+        return "\(tokens) · \(dollars(usage.totalCost))"
+    }
+
     /// Percentages shown to the user are clamped: a provider never reports
     /// more than 100% of a window, and anything outside 0...100 is a bug
     /// upstream that must not reach the menu bar as "4,812,000%".
