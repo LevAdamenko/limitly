@@ -202,7 +202,7 @@ struct SettingsView: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "info.circle")
                         .foregroundStyle(.secondary)
-                    Text("Both percentages are the providers\u{2019} own real usage figures, not an estimate \u{2014} Codex\u{2019}s read live from the \u{2018}codex\u{2019} CLI\u{2019}s account status, Claude\u{2019}s from its status line when connected above, otherwise from the Claude desktop app\u{2019}s local cache. The budget fields below are only a fallback for when no real figure is available. Weekly alerts use the trailing seven days; \u{201C}Remaining\u{201D} inverts both the current and weekly percentage.")
+                    Text("Both percentages are the providers\u{2019} own real usage figures, not an estimate \u{2014} Codex\u{2019}s read live from the \u{2018}codex\u{2019} CLI\u{2019}s account status, Claude\u{2019}s from its status line when connected above, otherwise from the Claude desktop app\u{2019}s local cache. When no real figure is available yet (for example right after launch) the menu bar shows \u{2014} instead of guessing. Token and dollar totals in the popover come from local logs via ccusage; dollars are API list prices, not your bill. \u{201C}Remaining\u{201D} inverts both the current and weekly percentage.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -258,26 +258,6 @@ struct SettingsView: View {
     @ViewBuilder
     private func agentSection(_ name: String, symbol: String, binding: Binding<AgentSettings>) -> some View {
         settingsCard(title: name, symbol: symbol) {
-            settingRow("Budget unit") {
-                Picker("Budget unit", selection: binding.budgetUnit) {
-                    ForEach(BudgetUnit.allCases, id: \.self) {
-                        Text($0.displayName).tag($0)
-                    }
-                }
-                .labelsHidden()
-                .onChange(of: binding.budgetUnit.wrappedValue) { _, _ in settings.save() }
-            }
-
-            rowDivider
-
-            settingRow("Usage budget") {
-                TextField("Usage budget", value: binding.budgetAmount, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: binding.budgetAmount.wrappedValue) { _, _ in settings.save() }
-            }
-
-            rowDivider
-
             settingRow("Notify at thresholds") {
                 Toggle("Notify at thresholds", isOn: binding.thresholdNotificationsEnabled)
                     .labelsHidden()
@@ -292,14 +272,6 @@ struct SettingsView: View {
                     .textFieldStyle(.roundedBorder)
                     .disabled(!binding.thresholdNotificationsEnabled.wrappedValue)
                     .onChange(of: binding.thresholds.wrappedValue) { _, _ in settings.save() }
-            }
-
-            rowDivider
-
-            settingRow("Weekly budget") {
-                TextField("Weekly budget", value: binding.weeklyBudgetAmount, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: binding.weeklyBudgetAmount.wrappedValue) { _, _ in settings.save() }
             }
 
             rowDivider

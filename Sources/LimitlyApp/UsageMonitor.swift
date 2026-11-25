@@ -154,19 +154,32 @@ final class UsageMonitor: ObservableObject {
     var menuBarTitle: String { "Claude \(percentageText(for: .claude)) · Codex \(percentageText(for: .codex))" }
     /// Prefers the provider's own real percentage over the budget-derived
     /// estimate when one is available — see `realPercentage(for:)`.
-    func percentageText(for agent: AgentID) -> String { guard let value = realPercentage(for: agent) else { return "—" }; return "\(Int(settings.displayed(value).rounded()))%" }
+    func percentageText(for agent: AgentID) -> String { guard let value = realPercentage(for: agent) else { return "—" }; return "\(Int(settings.displayed(UsageFormat.clampedPercent(value)).rounded()))%" }
     /// The actual fraction of budget used, ignoring the "Show percentage
     /// as" display toggle — for UI that visualizes severity (progress bars,
     /// color coding), which must reflect real usage even when the user has
     /// chosen to display the inverted "Remaining" number as text.
     func usedFraction(for agent: AgentID) -> Double? { realPercentage(for: agent) }
-    func weeklyText(for agent: AgentID) -> String { guard let usage = snapshot.weeklyUsage[agent] else { return "No data" }; let real = snapshot.realWeeklyPercentages[agent]; let pct = (real ?? settings.weeklyBudget(for: agent).percentage(for: usage)).map { " (\(Int(settings.displayed($0).rounded()))%)" } ?? ""; return format(usage, unit: settings.budget(for: agent).unit) + pct }
-    private func realPercentage(for agent: AgentID) -> Double? {
-        if let real = snapshot.realCurrentPercentages[agent] { return real }
-        guard let usage = snapshot.currentUsage[agent] else { return nil }
-        return settings.budget(for: agent).percentage(for: usage)
+    /// The provider's own weekly percentage (the only number that matches
+    /// the real limit) next to what was actually spent over the last seven
+    /// days, as plain tokens and API-price dollars — never a percentage of a
+    /// typed-in budget, which is how "4,812,000%" used to reach the popover.
+    func weeklyText(for agent: AgentID) -> String {
+        var parts: [String] = []
+        if let real = snapshot.realWeeklyPercentages[agent] {
+            parts.append("\(Int(settings.displayed(UsageFormat.clampedPercent(real)).rounded()))%")
+        }
+        if let usage = snapshot.weeklyUsage[agent] { parts.append(format(usage)) }
+        return parts.isEmpty ? "No data" : parts.joined(separator: " · ")
     }
-    func usageText(for agent: AgentID) -> String { guard let usage = snapshot.currentUsage[agent] else { return agent == .claude ? "No usage in current session" : "No usage today" }; let label = agent == .claude ? "Current session" : "Today"; return "\(label): \(format(usage, unit: settings.budget(for: agent).unit))" }
+    /// Only ever the provider's real figure. A missing one shows "—" rather
+    /// than a guess: the old budget-derived fallback divided hundreds of
+    /// millions of tokens by a budget of 20 and put millions of percent in
+    /// the menu bar on every restart.
+    private func realPercentage(for agent: AgentID) -> Double? {
+        snapshot.realCurrentPercentages[agent]
+    }
+    func usageText(for agent: AgentID) -> String { guard let usage = snapshot.currentUsage[agent] else { return agent == .claude ? "No usage in current session" : "No usage today" }; let label = agent == .claude ? "Current session" : "Today"; return "\(label): \(format(usage))" }
 
     func resetText(for agent: AgentID) -> String? {
         guard let resolved = resolvedSession(for: agent) else { return nil }
@@ -303,8 +316,8 @@ final class UsageMonitor: ObservableObject {
         }
     }
 
-    /// The budget estimate behind a missing real percentage comes from
-    /// `ccusage`, for both the menu bar and threshold alerts. With every real
+    /// While a real figure is missing, `ccusage`'s active block is the only
+    /// session boundary the desktop-cache fallback can use. With every real
     /// figure present, its totals only appear in the popover.
     private var isMissingRealPercentage: Bool {
         AgentID.allCases.contains { snapshot.realCurrentPercentages[$0] == nil || snapshot.realWeeklyPercentages[$0] == nil }
@@ -526,10 +539,20 @@ final class UsageMonitor: ObservableObject {
         // (cheap, and keeps their crossing state correct for whenever it's
         // turned back on) — only delivery is gated per agent.
         for event in thresholdEvents where settings.config(for: event.agent).thresholdNotificationsEnabled {
-            deliver(title: "\(event.agent.displayName) usage alert", body: "Current usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).")
+            let used = Int(UsageFormat.clampedPercent(event.percentage).rounded())
+            let reset = resolvedSession(for: event.agent)?.resetsAt.map { " · resets \(Self.clockText(for: $0, now: Date()))" } ?? ""
+            deliver(
+                title: "\(event.agent.displayName): \(used)% of 5-hour limit used",
+                body: "Passed your \(Int(event.threshold))% alert\(reset)."
+            )
         }
         for event in weeklyEvents where settings.config(for: event.agent).thresholdNotificationsEnabled {
-            deliver(title: "\(event.agent.displayName) weekly usage alert", body: "Trailing 7-day usage reached \(Int(event.threshold))% (\(Int(event.percentage.rounded()))%).")
+            let used = Int(UsageFormat.clampedPercent(event.percentage).rounded())
+            let reset = resolvedWeekly(for: event.agent)?.resetsAt.map { " · resets \(Self.clockText(for: $0, now: Date()))" } ?? ""
+            deliver(
+                title: "\(event.agent.displayName): \(used)% of weekly limit used",
+                body: "Passed your \(Int(event.threshold))% weekly alert\(reset)."
+            )
         }
     }
 
@@ -558,21 +581,11 @@ final class UsageMonitor: ObservableObject {
         for event in idleEvents { deliver(title: "\(event.agent.displayName) is idle", body: "No new usage has appeared for \(Int(settings.idleSeconds)) seconds.") }
     }
 
-    private func percentages(_ snapshot: UsageSnapshot) -> [AgentID: Double] {
-        Dictionary(uniqueKeysWithValues: AgentID.allCases.compactMap { agent -> (AgentID, Double)? in
-            if let real = snapshot.realCurrentPercentages[agent] { return (agent, real) }
-            guard let totals = snapshot.currentUsage[agent], let value = settings.budget(for: agent).percentage(for: totals) else { return nil }
-            return (agent, value)
-        })
-    }
-    private func weeklyPercentages(_ snapshot: UsageSnapshot) -> [AgentID: Double] {
-        Dictionary(uniqueKeysWithValues: AgentID.allCases.compactMap { agent -> (AgentID, Double)? in
-            if let real = snapshot.realWeeklyPercentages[agent] { return (agent, real) }
-            guard let totals = snapshot.weeklyUsage[agent], let value = settings.weeklyBudget(for: agent).percentage(for: totals) else { return nil }
-            return (agent, value)
-        })
-    }
-    private func format(_ usage: UsageTotals, unit: BudgetUnit) -> String { switch unit { case .tokens: return "\(usage.totalTokens.formatted()) tokens"; case .dollars: return usage.totalCost.formatted(.currency(code: "USD")) } }
+    /// Alerts fire on real provider figures only — a guessed percentage
+    /// crossing a threshold is how a bogus alert happens.
+    private func percentages(_ snapshot: UsageSnapshot) -> [AgentID: Double] { snapshot.realCurrentPercentages }
+    private func weeklyPercentages(_ snapshot: UsageSnapshot) -> [AgentID: Double] { snapshot.realWeeklyPercentages }
+    private func format(_ usage: UsageTotals) -> String { "\(UsageFormat.compactTokens(usage.totalTokens)) · \(UsageFormat.dollars(usage.totalCost))" }
     private func deliver(title: String, body: String, workingDirectory: String? = nil) {
         if settings.delivery == .banner {
             let onClick: (() -> Void)? = workingDirectory.map { directory in

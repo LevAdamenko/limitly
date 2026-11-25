@@ -11,13 +11,13 @@ final class ThresholdDetectorTests: XCTestCase {
         XCTAssertEqual(events, [ThresholdEvent(agent: .claude, threshold: 50, percentage: 50)])
     }
 
-    func testFiresEveryCrossedThresholdInAscendingOrder() {
+    func testOneJumpAcrossSeveralThresholdsFiresOnlyTheHighest() {
         var detector = ThresholdDetector()
         _ = detector.observe(percentages: [.codex: 40], thresholds: [.codex: [100, 50, 80]])
 
         let events = detector.observe(percentages: [.codex: 105], thresholds: [.codex: [100, 50, 80]])
 
-        XCTAssertEqual(events.map(\.threshold), [50, 80, 100])
+        XCTAssertEqual(events, [ThresholdEvent(agent: .codex, threshold: 100, percentage: 105)])
     }
 
     func testInitialObservationDoesNotFire() {

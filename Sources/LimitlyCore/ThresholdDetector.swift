@@ -28,8 +28,12 @@ public struct ThresholdDetector: Sendable {
             guard let previous = previousPercentages[agent] else { continue }
 
             let configured = Set((thresholds[agent] ?? []).filter { $0 >= 0 && $0.isFinite })
-            for threshold in configured.sorted() where previous < threshold && percentage >= threshold {
-                events.append(ThresholdEvent(agent: agent, threshold: threshold, percentage: percentage))
+            // One jump can cross several thresholds at once (the status line
+            // only refreshes while Claude Code redraws, so usage from another
+            // machine lands in a single step). Report only the highest one:
+            // three banners saying "50%", "80%", "100%" for one reading is noise.
+            if let highest = configured.filter({ previous < $0 && percentage >= $0 }).max() {
+                events.append(ThresholdEvent(agent: agent, threshold: highest, percentage: percentage))
             }
         }
 
